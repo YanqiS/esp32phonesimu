@@ -6,7 +6,6 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "driver/gpio.h"
-#include "driver/uart.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
@@ -22,6 +21,7 @@
 #include "esp_hf_ag_api.h"
 
 #define TAG "BT_PHONE"
+#define ENABLE_UART_CMD_TASK 0
 
 // ========== 引脚定义 ==========
 // LED指示灯
@@ -529,146 +529,10 @@ static void log_current_state(void)
 
 static void uart_cmd_task(void *arg)
 {
-    char line[96];
-    size_t line_len = 0;
+    (void)arg;
     print_uart_help();
-
-    // 使用IDF UART驱动读取串口，避免stdin/fgets在部分板卡环境下引发异常
-    uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0);
-
-    while (1)
-    {
-        uint8_t ch = 0;
-        int n = uart_read_bytes(UART_NUM_0, &ch, 1, pdMS_TO_TICKS(50));
-        if (n <= 0)
-        {
-            continue;
-        }
-
-        if (ch == '\r' || ch == '\n')
-        {
-            if (line_len == 0)
-            {
-                continue;
-            }
-            line[line_len] = '\0';
-            line_len = 0;
-        }
-        else
-        {
-            if (line_len < sizeof(line) - 1)
-            {
-                line[line_len++] = (char)ch;
-            }
-            continue;
-        }
-
-        if (strncmp(line, "help", 4) == 0)
-        {
-            print_uart_help();
-        }
-        else if (strncmp(line, "incoming ", 9) == 0)
-        {
-            simulate_incoming_call(line + 9);
-        }
-        else if (strncmp(line, "add_contact ", 12) == 0)
-        {
-            char num[32] = {0};
-            char name[32] = {0};
-            if (sscanf(line + 12, "%31s %31s", num, name) == 2)
-            {
-                if (add_contact(num, name))
-                {
-                    ESP_LOGI(TAG, "✅ 已保存联系人: %s -> %s", num, name);
-                }
-                else
-                {
-                    ESP_LOGW(TAG, "❌ 保存失败（容量满或参数错误）");
-                }
-            }
-            else
-            {
-                ESP_LOGW(TAG, "参数错误，格式: add_contact <num> <name>");
-            }
-        }
-        else if (strcmp(line, "contacts") == 0)
-        {
-            dump_contacts();
-        }
-        else if (strncmp(line, "dial ", 5) == 0)
-        {
-            handle_call_dial(line + 5);
-        }
-        else if (strcmp(line, "answer") == 0)
-        {
-            handle_call_answer();
-        }
-        else if (strcmp(line, "reject") == 0)
-        {
-            handle_call_reject();
-        }
-        else if (strcmp(line, "hangup") == 0)
-        {
-            handle_call_hangup();
-        }
-        else if (strcmp(line, "disconnect") == 0)
-        {
-            force_disconnect_hfp();
-        }
-        else if (strcmp(line, "rebootbt") == 0)
-        {
-            if (bt_on)
-            {
-                bt_deinit();
-                vTaskDelay(pdMS_TO_TICKS(500));
-            }
-
-            if (bt_init() == ESP_OK)
-            {
-                bt_on = true;
-                led_mode = 1;
-                ESP_LOGI(TAG, "✅ 蓝牙协议栈已重启");
-            }
-            else
-            {
-                bt_on = false;
-                led_mode = 5;
-                ESP_LOGE(TAG, "❌ 蓝牙协议栈重启失败");
-            }
-        }
-        else if (strncmp(line, "stress_conn ", 12) == 0)
-        {
-            int rounds = 0;
-            int interval_ms = 0;
-            if (sscanf(line + 12, "%d %d", &rounds, &interval_ms) == 2 && rounds > 0 && interval_ms > 0)
-            {
-                conn_stress_cfg_t *cfg = malloc(sizeof(conn_stress_cfg_t));
-                if (cfg)
-                {
-                    cfg->rounds = rounds;
-                    cfg->interval_ms = interval_ms;
-                    xTaskCreate(conn_stress_task, "conn_stress", 4096, cfg, 4, NULL);
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "内存不足，无法启动压力测试");
-                }
-            }
-            else
-            {
-                ESP_LOGW(TAG, "参数错误，格式: stress_conn <rounds> <interval_ms>");
-            }
-        }
-        else if (strcmp(line, "state") == 0)
-        {
-            log_current_state();
-        }
-        else if (line[0] != '\0')
-        {
-            ESP_LOGW(TAG, "未知命令: %s", line);
-            print_uart_help();
-        }
-    }
+    ESP_LOGW(TAG, "UART命令任务默认关闭（ENABLE_UART_CMD_TASK=0），避免与控制台串口冲突导致复位");
+    vTaskDelete(NULL);
 }
 
 /* ===================== HFP AG事件回调 ===================== */
@@ -1022,11 +886,14 @@ void app_main(void)
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
-    xTaskCreate(uart_cmd_task, "uart_cmd", 4096, NULL, 4, NULL);
+    if (ENABLE_UART_CMD_TASK)
+    {
+        xTaskCreate(uart_cmd_task, "uart_cmd", 4096, NULL, 4, NULL);
+    }
 
     ESP_LOGI(TAG, "💡 系统就绪");
     ESP_LOGI(TAG, "💡 按BOOT键 (GPIO0) 启动蓝牙");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
-    ESP_LOGI(TAG, "💡 也可通过串口命令自动化测试（输入 help 查看）");
+    ESP_LOGI(TAG, "💡 串口命令任务默认关闭，如需开启请设置 ENABLE_UART_CMD_TASK=1");
     ESP_LOGI(TAG, "");
 }
