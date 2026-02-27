@@ -382,17 +382,36 @@ void handle_call_dial(const char *number)
 
 static void force_disconnect_hfp(void)
 {
+    if (!bt_on)
+    {
+        ESP_LOGW(TAG, "蓝牙未开启，无法断开");
+        return;
+    }
+
     if (!hfp_connected)
     {
         ESP_LOGW(TAG, "当前未连接，无需断开");
         return;
     }
 
-    ESP_LOGI(TAG, "🔌 主动断开HFP连接");
-    esp_err_t ret = esp_hf_ag_disconnect(connected_device);
-    if (ret != ESP_OK)
+    // ESP-IDF v5.4 的 HFP AG API 未提供主动断开指定连接的接口，
+    // 通过重启BT协议栈实现“强制断连”，并恢复到可连接状态。
+    ESP_LOGI(TAG, "🔌 通过重启蓝牙协议栈强制断开HFP连接");
+    bt_deinit();
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    esp_err_t ret = bt_init();
+    if (ret == ESP_OK)
     {
-        ESP_LOGE(TAG, "断开失败: %s", esp_err_to_name(ret));
+        bt_on = true;
+        led_mode = 1;
+        ESP_LOGI(TAG, "✅ 已完成强制断连，等待车机重新连接");
+    }
+    else
+    {
+        bt_on = false;
+        led_mode = 5;
+        ESP_LOGE(TAG, "❌ 蓝牙重启失败: %s", esp_err_to_name(ret));
     }
 }
 
