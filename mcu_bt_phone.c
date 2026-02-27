@@ -1,5 +1,7 @@
 #include <string.h>
 #include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -51,6 +53,15 @@ typedef enum {
 static call_state_t current_call_state = CALL_STATE_IDLE;
 static char current_phone_number[32] = "";
 static TimerHandle_t ring_timer = NULL;
+
+static esp_err_t bt_init(void);
+static void bt_deinit(void);
+
+// 自动化测试参数
+typedef struct {
+    int rounds;
+    int interval_ms;
+} conn_stress_cfg_t;
 
 /* ===================== LED控制 ===================== */
 
@@ -366,6 +377,167 @@ void handle_call_dial(const char *number)
         esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0); // callsetup=0 (空闲)
 
         esp_hf_ag_audio_connect(connected_device);
+    }
+}
+
+static void force_disconnect_hfp(void)
+{
+    if (!hfp_connected)
+    {
+        ESP_LOGW(TAG, "当前未连接，无需断开");
+        return;
+    }
+
+    ESP_LOGI(TAG, "🔌 主动断开HFP连接");
+    esp_err_t ret = esp_hf_ag_disconnect(connected_device);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "断开失败: %s", esp_err_to_name(ret));
+    }
+}
+
+static void conn_stress_task(void *arg)
+{
+    conn_stress_cfg_t cfg = *(conn_stress_cfg_t *)arg;
+    free(arg);
+
+    ESP_LOGI(TAG, "🚦 开始连接稳定性测试: rounds=%d interval=%dms", cfg.rounds, cfg.interval_ms);
+
+    for (int i = 0; i < cfg.rounds; ++i)
+    {
+        ESP_LOGI(TAG, "[%d/%d] 触发断连", i + 1, cfg.rounds);
+        force_disconnect_hfp();
+        vTaskDelay(pdMS_TO_TICKS(cfg.interval_ms));
+
+        ESP_LOGI(TAG, "[%d/%d] 保持可连接状态，等待车机自动回连", i + 1, cfg.rounds);
+        vTaskDelay(pdMS_TO_TICKS(cfg.interval_ms));
+    }
+
+    ESP_LOGI(TAG, "✅ 连接稳定性测试结束");
+    vTaskDelete(NULL);
+}
+
+static void print_uart_help(void)
+{
+    ESP_LOGI(TAG, "\n====== 串口命令 ======");
+    ESP_LOGI(TAG, "help                               : 查看帮助");
+    ESP_LOGI(TAG, "incoming <num>                     : 触发来电");
+    ESP_LOGI(TAG, "dial <num>                         : 模拟外拨");
+    ESP_LOGI(TAG, "answer | reject | hangup           : 接听/拒接/挂断");
+    ESP_LOGI(TAG, "disconnect                         : 主动断开HFP连接");
+    ESP_LOGI(TAG, "rebootbt                           : 重启蓝牙协议栈");
+    ESP_LOGI(TAG, "stress_conn <rounds> <interval_ms> : 断连/回连压力测试");
+    ESP_LOGI(TAG, "state                              : 打印当前状态");
+    ESP_LOGI(TAG, "======================\n");
+}
+
+static void log_current_state(void)
+{
+    ESP_LOGI(TAG, "状态: bt_on=%d hfp_connected=%d call_state=%d number=%s",
+             bt_on, hfp_connected, current_call_state,
+             current_phone_number[0] ? current_phone_number : "<none>");
+}
+
+static void uart_cmd_task(void *arg)
+{
+    char line[96];
+    print_uart_help();
+
+    while (1)
+    {
+        if (!fgets(line, sizeof(line), stdin))
+        {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        char *nl = strchr(line, '\n');
+        if (nl)
+        {
+            *nl = '\0';
+        }
+
+        if (strncmp(line, "help", 4) == 0)
+        {
+            print_uart_help();
+        }
+        else if (strncmp(line, "incoming ", 9) == 0)
+        {
+            simulate_incoming_call(line + 9);
+        }
+        else if (strncmp(line, "dial ", 5) == 0)
+        {
+            handle_call_dial(line + 5);
+        }
+        else if (strcmp(line, "answer") == 0)
+        {
+            handle_call_answer();
+        }
+        else if (strcmp(line, "reject") == 0)
+        {
+            handle_call_reject();
+        }
+        else if (strcmp(line, "hangup") == 0)
+        {
+            handle_call_hangup();
+        }
+        else if (strcmp(line, "disconnect") == 0)
+        {
+            force_disconnect_hfp();
+        }
+        else if (strcmp(line, "rebootbt") == 0)
+        {
+            if (bt_on)
+            {
+                bt_deinit();
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+
+            if (bt_init() == ESP_OK)
+            {
+                bt_on = true;
+                led_mode = 1;
+                ESP_LOGI(TAG, "✅ 蓝牙协议栈已重启");
+            }
+            else
+            {
+                bt_on = false;
+                led_mode = 5;
+                ESP_LOGE(TAG, "❌ 蓝牙协议栈重启失败");
+            }
+        }
+        else if (strncmp(line, "stress_conn ", 12) == 0)
+        {
+            int rounds = 0;
+            int interval_ms = 0;
+            if (sscanf(line + 12, "%d %d", &rounds, &interval_ms) == 2 && rounds > 0 && interval_ms > 0)
+            {
+                conn_stress_cfg_t *cfg = malloc(sizeof(conn_stress_cfg_t));
+                if (cfg)
+                {
+                    cfg->rounds = rounds;
+                    cfg->interval_ms = interval_ms;
+                    xTaskCreate(conn_stress_task, "conn_stress", 4096, cfg, 4, NULL);
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "内存不足，无法启动压力测试");
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "参数错误，格式: stress_conn <rounds> <interval_ms>");
+            }
+        }
+        else if (strcmp(line, "state") == 0)
+        {
+            log_current_state();
+        }
+        else if (line[0] != '\0')
+        {
+            ESP_LOGW(TAG, "未知命令: %s", line);
+            print_uart_help();
+        }
     }
 }
 
@@ -717,9 +889,11 @@ void app_main(void)
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
+    xTaskCreate(uart_cmd_task, "uart_cmd", 4096, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "💡 系统就绪");
     ESP_LOGI(TAG, "💡 按BOOT键 (GPIO0) 启动蓝牙");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
+    ESP_LOGI(TAG, "💡 也可通过串口命令自动化测试（输入 help 查看）");
     ESP_LOGI(TAG, "");
 }
