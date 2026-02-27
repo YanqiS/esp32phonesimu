@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
@@ -529,20 +530,37 @@ static void log_current_state(void)
 static void uart_cmd_task(void *arg)
 {
     char line[96];
+    size_t line_len = 0;
     print_uart_help();
+
+    // 使用IDF UART驱动读取串口，避免stdin/fgets在部分板卡环境下引发异常
+    uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0);
 
     while (1)
     {
-        if (!fgets(line, sizeof(line), stdin))
+        uint8_t ch = 0;
+        int n = uart_read_bytes(UART_NUM_0, &ch, 1, pdMS_TO_TICKS(50));
+        if (n <= 0)
         {
-            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        char *nl = strchr(line, '\n');
-        if (nl)
+        if (ch == '\r' || ch == '\n')
         {
-            *nl = '\0';
+            if (line_len == 0)
+            {
+                continue;
+            }
+            line[line_len] = '\0';
+            line_len = 0;
+        }
+        else
+        {
+            if (line_len < sizeof(line) - 1)
+            {
+                line[line_len++] = (char)ch;
+            }
+            continue;
         }
 
         if (strncmp(line, "help", 4) == 0)
