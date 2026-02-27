@@ -63,6 +63,67 @@ typedef struct {
     int interval_ms;
 } conn_stress_cfg_t;
 
+typedef struct {
+    char number[32];
+    char name[32];
+} contact_t;
+
+#define MAX_CONTACTS 20
+static contact_t contacts[MAX_CONTACTS];
+static size_t contacts_count = 0;
+
+
+static const char *lookup_contact_name(const char *number)
+{
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        if (strcmp(contacts[i].number, number) == 0)
+        {
+            return contacts[i].name;
+        }
+    }
+    return NULL;
+}
+
+static bool add_contact(const char *number, const char *name)
+{
+    if (!number || !name || number[0] == '\0' || name[0] == '\0')
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        if (strcmp(contacts[i].number, number) == 0)
+        {
+            strncpy(contacts[i].name, name, sizeof(contacts[i].name) - 1);
+            contacts[i].name[sizeof(contacts[i].name) - 1] = '\0';
+            return true;
+        }
+    }
+
+    if (contacts_count >= MAX_CONTACTS)
+    {
+        return false;
+    }
+
+    strncpy(contacts[contacts_count].number, number, sizeof(contacts[contacts_count].number) - 1);
+    contacts[contacts_count].number[sizeof(contacts[contacts_count].number) - 1] = '\0';
+    strncpy(contacts[contacts_count].name, name, sizeof(contacts[contacts_count].name) - 1);
+    contacts[contacts_count].name[sizeof(contacts[contacts_count].name) - 1] = '\0';
+    contacts_count++;
+    return true;
+}
+
+static void dump_contacts(void)
+{
+    ESP_LOGI(TAG, "通讯录条目: %u", (unsigned)contacts_count);
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        ESP_LOGI(TAG, "[%u] %s -> %s", (unsigned)i, contacts[i].number, contacts[i].name);
+    }
+}
+
 /* ===================== LED控制 ===================== */
 
 static inline void led_off(void)
@@ -172,6 +233,11 @@ void simulate_incoming_call(const char *phone_number)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "📞 ========== 模拟来电 ==========");
     ESP_LOGI(TAG, "📞 来电号码: %s", phone_number);
+    const char *caller_name = lookup_contact_name(phone_number);
+    if (caller_name)
+    {
+        ESP_LOGI(TAG, "📇 联系人: %s", caller_name);
+    }
     ESP_LOGI(TAG, "📞 ===============================");
 
     // 保存电话号码
@@ -441,12 +507,15 @@ static void print_uart_help(void)
     ESP_LOGI(TAG, "\n====== 串口命令 ======");
     ESP_LOGI(TAG, "help                               : 查看帮助");
     ESP_LOGI(TAG, "incoming <num>                     : 触发来电");
+    ESP_LOGI(TAG, "add_contact <num> <name>           : 添加/更新本地联系人");
+    ESP_LOGI(TAG, "contacts                           : 打印本地联系人");
     ESP_LOGI(TAG, "dial <num>                         : 模拟外拨");
     ESP_LOGI(TAG, "answer | reject | hangup           : 接听/拒接/挂断");
     ESP_LOGI(TAG, "disconnect                         : 主动断开HFP连接");
     ESP_LOGI(TAG, "rebootbt                           : 重启蓝牙协议栈");
     ESP_LOGI(TAG, "stress_conn <rounds> <interval_ms> : 断连/回连压力测试");
     ESP_LOGI(TAG, "state                              : 打印当前状态");
+    ESP_LOGI(TAG, "note: 暂不支持PBAP通讯录同步，仅支持本地联系人映射");
     ESP_LOGI(TAG, "======================\n");
 }
 
@@ -483,6 +552,30 @@ static void uart_cmd_task(void *arg)
         else if (strncmp(line, "incoming ", 9) == 0)
         {
             simulate_incoming_call(line + 9);
+        }
+        else if (strncmp(line, "add_contact ", 12) == 0)
+        {
+            char num[32] = {0};
+            char name[32] = {0};
+            if (sscanf(line + 12, "%31s %31s", num, name) == 2)
+            {
+                if (add_contact(num, name))
+                {
+                    ESP_LOGI(TAG, "✅ 已保存联系人: %s -> %s", num, name);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "❌ 保存失败（容量满或参数错误）");
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "参数错误，格式: add_contact <num> <name>");
+            }
+        }
+        else if (strcmp(line, "contacts") == 0)
+        {
+            dump_contacts();
         }
         else if (strncmp(line, "dial ", 5) == 0)
         {
@@ -904,6 +997,9 @@ void app_main(void)
         .pull_up_en = GPIO_PULLUP_ENABLE,
     };
     gpio_config(&call_conf);
+
+    add_contact("13800138000", "Alice");
+    add_contact("13900139000", "Bob");
 
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
