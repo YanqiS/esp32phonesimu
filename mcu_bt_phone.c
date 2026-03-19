@@ -537,12 +537,10 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             ESP_LOGI(TAG, "💡 按CALL_KEY (GPIO23) 模拟来电");
             ESP_LOGI(TAG, "");
 
-            esp_hf_ag_devices_status_indchange(
-                connected_device,
-                ESP_HF_CALL_STATUS_NO_CALLS,
-                ESP_HF_CALL_SETUP_STATUS_IDLE,
-                ESP_HF_NETWORK_STATE_AVAILABLE,
-                5);
+            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);
+            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);
         }
         else
         {
@@ -639,7 +637,6 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 
     case ESP_HF_IND_UPDATE_EVT:
         ESP_LOGI(TAG, "HF请求更新指示器");
-        esp_hf_ag_ciev_report(param->ind_upd.remote_addr, param->ind_upd.ind_id, param->ind_upd.ind_value);
         break;
 
     default:
