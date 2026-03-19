@@ -444,9 +444,36 @@ void simulate_incoming_call(const char *phone_number)
 // 接听来电
 void handle_call_answer(void)
 {
-    if (current_call_state != CALL_STATE_INCOMING)
+    if (current_call_state != CALL_STATE_INCOMING &&
+        current_call_state != CALL_STATE_ALERTING &&
+        current_call_state != CALL_STATE_DIALING)
     {
-        ESP_LOGW(TAG, "❌ 当前无来电，无法接听");
+        ESP_LOGW(TAG, "❌ 当前没有可接通的呼叫");
+        return;
+    }
+
+    if (current_call_state == CALL_STATE_ALERTING || current_call_state == CALL_STATE_DIALING)
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "✅ ========== 对方接听 ==========");
+        ESP_LOGI(TAG, "✅ 电话号码: %s", current_phone_number);
+        ESP_LOGI(TAG, "✅ ===============================");
+
+        current_call_state = CALL_STATE_ACTIVE;
+        led_mode = 4;
+
+        esp_hf_ag_out_call(
+            connected_device,
+            1,
+            0,
+            ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
+            ESP_HF_CALL_SETUP_STATUS_IDLE,
+            current_phone_number,
+            ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+
+        sync_hfp_call_indicators(1, 0);
+        esp_hf_ag_audio_connect(connected_device);
+        ESP_LOGI(TAG, "🎙️ 已切换到通话中，等待音频链路建立...");
         return;
     }
 
@@ -623,30 +650,7 @@ void handle_call_dial(const char *number)
         sync_hfp_call_indicators(0, 3);
     }
 
-    // 模拟对方接听（再过1秒自动接通）
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    if (current_call_state == CALL_STATE_DIALING || current_call_state == CALL_STATE_ALERTING)
-    {
-        ESP_LOGI(TAG, "✅ 对方已接听");
-        current_call_state = CALL_STATE_ACTIVE;
-        led_mode = 4; // 红灯常亮
-
-        esp_hf_ag_out_call(
-            connected_device,
-            1,                                // num_active=1
-            0,
-            ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
-            ESP_HF_CALL_SETUP_STATUS_IDLE,
-            current_phone_number,
-            ESP_HF_CALL_ADDR_TYPE_UNKNOWN
-        );
-
-        // 更新呼叫状态
-        sync_hfp_call_indicators(1, 0);
-
-        esp_hf_ag_audio_connect(connected_device);
-    }
+    ESP_LOGI(TAG, "💡 等待对端接听：板子旋钮2→0可接通，旋钮3→0可取消");
 }
 
 /* ===================== HFP AG事件回调 ===================== */
@@ -1063,12 +1067,14 @@ static void switch_monitor_task(void *arg)
 {
     int last_right = -1;
     int max_seen_position = 0;
+    TickType_t ignore_until = 0;
 
     while (1)
     {
         int right = read_bcd(BCD2_1, BCD2_2, BCD2_4, BCD2_8);
+        TickType_t now = xTaskGetTickCount();
 
-        if (right != last_right)
+        if (right != last_right && now >= ignore_until)
         {
             ESP_LOGI(TAG, "旋钮2: %d", right);
 
@@ -1086,15 +1092,17 @@ static void switch_monitor_task(void *arg)
             }
             else if (max_seen_position == 1 && right == 0)
             {
-                ESP_LOGI(TAG, "📞 [旋钮2] 触发外拨: %s", DEFAULT_DIAL_NUMBER);
-                handle_call_dial(DEFAULT_DIAL_NUMBER);
+                ESP_LOGI(TAG, "📞 [旋钮2] 触发模拟来电: %s", DEFAULT_DIAL_NUMBER);
+                simulate_incoming_call(DEFAULT_DIAL_NUMBER);
                 max_seen_position = 0;
+                ignore_until = now + pdMS_TO_TICKS(300);
             }
             else if (max_seen_position == 2 && right == 0)
             {
-                ESP_LOGI(TAG, "📞 [旋钮2] 触发接听");
+                ESP_LOGI(TAG, "📞 [旋钮2] 触发接通");
                 handle_call_answer();
                 max_seen_position = 0;
+                ignore_until = now + pdMS_TO_TICKS(300);
             }
             else if (max_seen_position >= 3 && right == 0)
             {
@@ -1129,6 +1137,7 @@ static void switch_monitor_task(void *arg)
                     ESP_LOGW(TAG, "❌ 当前没有可挂断的呼叫");
                 }
                 max_seen_position = 0;
+                ignore_until = now + pdMS_TO_TICKS(300);
             }
             else
             {
@@ -1235,6 +1244,6 @@ void app_main(void)
     ESP_LOGI(TAG, "💡 系统就绪");
     ESP_LOGI(TAG, "💡 上电后会自动启动蓝牙，BOOT键可手动重启");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
-    ESP_LOGI(TAG, "💡 旋钮2: 1→0外拨, 2→0接听, 3→0挂断/拒接");
+    ESP_LOGI(TAG, "💡 旋钮2: 1→0模拟来电, 2→0接通, 3→0挂断/拒接");
     ESP_LOGI(TAG, "");
 }
