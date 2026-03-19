@@ -21,14 +21,28 @@
 #define TAG "BT_PHONE"
 
 // ========== 引脚定义 ==========
-// LED指示灯
+// 左旋码（沿用 mcu1_led 配置）
+#define BCD1_1 GPIO_NUM_35
+#define BCD1_2 GPIO_NUM_34
+#define BCD1_4 GPIO_NUM_33
+#define BCD1_8 GPIO_NUM_32
+
+// 右旋码（沿用 mcu1_led 配置）
+#define BCD2_1 GPIO_NUM_26
+#define BCD2_2 GPIO_NUM_25
+#define BCD2_4 GPIO_NUM_14
+#define BCD2_8 GPIO_NUM_27
+
+// LED指示灯（沿用 mcu1_led 配置）
 #define LED_R GPIO_NUM_18  // 红灯 - 通话中
-#define LED_G GPIO_NUM_5   // 绿灯 - 已连接
-#define LED_B GPIO_NUM_17  // 蓝灯 - 待机
+#define LED_G GPIO_NUM_17  // 绿灯 - 已连接
+#define LED_B GPIO_NUM_16  // 蓝灯 - 待机
 
 // 按键
 #define BOOT_KEY GPIO_NUM_0        // 开关蓝牙
 #define CALL_KEY GPIO_NUM_23       // 模拟来电按键
+
+#define DEFAULT_DIAL_NUMBER "13800138000"
 
 // ========== 全局变量 ==========
 static char my_mac_id[8];
@@ -51,6 +65,16 @@ typedef enum {
 static call_state_t current_call_state = CALL_STATE_IDLE;
 static char current_phone_number[32] = "";
 static TimerHandle_t ring_timer = NULL;
+
+static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_t bit8)
+{
+    int val = 0;
+    val |= (gpio_get_level(bit1) == 0) ? 1 : 0;
+    val |= (gpio_get_level(bit2) == 0) ? 2 : 0;
+    val |= (gpio_get_level(bit4) == 0) ? 4 : 0;
+    val |= (gpio_get_level(bit8) == 0) ? 8 : 0;
+    return val;
+}
 
 /* ===================== LED控制 ===================== */
 
@@ -660,6 +684,88 @@ static void button_task(void *arg)
     }
 }
 
+static void switch_monitor_task(void *arg)
+{
+    int last_right = -1;
+    int knob_state = 0;
+
+    while (1)
+    {
+        int right = read_bcd(BCD2_1, BCD2_2, BCD2_4, BCD2_8);
+
+        if (right != last_right)
+        {
+            ESP_LOGI(TAG, "旋钮2: %d", right);
+
+            if (knob_state == 0 && right == 0)
+            {
+                // 初始态
+            }
+            else if (knob_state == 0 && right >= 1 && right <= 3)
+            {
+                knob_state = right;
+                ESP_LOGI(TAG, "[旋钮2] 检测到转到位置%d", right);
+            }
+            else if (knob_state == 1 && right == 0)
+            {
+                ESP_LOGI(TAG, "📞 [旋钮2] 触发外拨: %s", DEFAULT_DIAL_NUMBER);
+                handle_call_dial(DEFAULT_DIAL_NUMBER);
+                knob_state = 0;
+            }
+            else if (knob_state == 2 && right == 0)
+            {
+                ESP_LOGI(TAG, "📞 [旋钮2] 触发接听");
+                handle_call_answer();
+                knob_state = 0;
+            }
+            else if (knob_state == 3 && right == 0)
+            {
+                ESP_LOGI(TAG, "📞 [旋钮2] 触发挂断/拒接");
+                if (current_call_state == CALL_STATE_INCOMING)
+                {
+                    handle_call_reject();
+                }
+                else if (current_call_state == CALL_STATE_ACTIVE)
+                {
+                    handle_call_hangup();
+                }
+                else if (current_call_state == CALL_STATE_DIALING)
+                {
+                    current_call_state = CALL_STATE_IDLE;
+                    led_mode = 2;
+                    esp_hf_ag_end_call(
+                        connected_device,
+                        0,
+                        0,
+                        ESP_HF_CALL_STATUS_NO_CALLS,
+                        ESP_HF_CALL_SETUP_STATUS_IDLE,
+                        current_phone_number,
+                        ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+                    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+                    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+                    esp_hf_ag_audio_disconnect(connected_device);
+                    memset(current_phone_number, 0, sizeof(current_phone_number));
+                    ESP_LOGI(TAG, "📵 外拨已取消");
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "❌ 当前没有可挂断的呼叫");
+                }
+                knob_state = 0;
+            }
+            else
+            {
+                knob_state = 0;
+                ESP_LOGI(TAG, "[旋钮2] 状态重置");
+            }
+
+            last_right = right;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 /* ===================== 主函数 ===================== */
 
 void app_main(void)
@@ -714,12 +820,32 @@ void app_main(void)
     };
     gpio_config(&call_conf);
 
+    gpio_config_t bcd_conf = {
+        .pin_bit_mask = (1ULL << BCD1_4) | (1ULL << BCD1_8) |
+                        (1ULL << BCD2_1) | (1ULL << BCD2_2) |
+                        (1ULL << BCD2_4) | (1ULL << BCD2_8),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    gpio_config(&bcd_conf);
+
+    gpio_set_direction(BCD1_1, GPIO_MODE_INPUT);
+    gpio_set_direction(BCD1_2, GPIO_MODE_INPUT);
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "当前旋钮: 左=%d, 右=%d",
+             read_bcd(BCD1_1, BCD1_2, BCD1_4, BCD1_8),
+             read_bcd(BCD2_1, BCD2_2, BCD2_4, BCD2_8));
+
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
+    xTaskCreate(switch_monitor_task, "switch", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "💡 系统就绪");
     ESP_LOGI(TAG, "💡 按BOOT键 (GPIO0) 启动蓝牙");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
+    ESP_LOGI(TAG, "💡 旋钮2: 1→0外拨, 2→0接听, 3→0挂断/拒接");
     ESP_LOGI(TAG, "");
 }
