@@ -76,6 +76,38 @@ static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_
     return val;
 }
 
+static esp_err_t bt_init(void);
+static void bt_deinit(void);
+
+static esp_err_t start_bt_phone(void)
+{
+    if (bt_on)
+    {
+        ESP_LOGI(TAG, "蓝牙手机模拟器已启动，无需重复启动");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "👆 启动蓝牙手机模拟器");
+    led_mode = 0;
+
+    esp_err_t ret = bt_init();
+    if (ret == ESP_OK)
+    {
+        bt_on = true;
+        led_mode = 1; // 蓝灯慢闪（待机）
+
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "🎉 蓝牙手机模拟器启动成功");
+        ESP_LOGI(TAG, "📱 现在应可在手机/车机上搜索到: %s", bt_name);
+        ESP_LOGI(TAG, "");
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "✗ 蓝牙启动失败: %s", esp_err_to_name(ret));
+    led_mode = 5; // 红灯快闪
+    return ret;
+}
+
 /* ===================== LED控制 ===================== */
 
 static inline void led_off(void)
@@ -500,6 +532,23 @@ static void bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         }
         break;
     }
+    case ESP_BT_GAP_PIN_REQ_EVT:
+    {
+        esp_bt_pin_code_t pin_code = {'1', '2', '3', '4'};
+        ESP_LOGI(TAG, "收到PIN码请求，回复固定PIN: 1234");
+        esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin_code);
+        break;
+    }
+    case ESP_BT_GAP_CFM_REQ_EVT:
+        ESP_LOGI(TAG, "收到配对确认请求: %" PRIu32, param->cfm_req.num_val);
+        esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+        break;
+    case ESP_BT_GAP_KEY_NOTIF_EVT:
+        ESP_LOGI(TAG, "收到配对密钥通知: %" PRIu32, param->key_notif.passkey);
+        break;
+    case ESP_BT_GAP_KEY_REQ_EVT:
+        ESP_LOGI(TAG, "收到配对密钥输入请求");
+        break;
     case ESP_BT_GAP_MODE_CHG_EVT:
         ESP_LOGI(TAG, "GAP模式变化: %d", param->mode_chg.mode);
         break;
@@ -551,15 +600,30 @@ static esp_err_t bt_init(void)
     esp_bt_gap_register_callback(bt_gap_cb);
 
     // 设置蓝牙设备名称（使用新API）
-    esp_bt_gap_set_device_name(bt_name);
+    ret = esp_bt_gap_set_device_name(bt_name);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置蓝牙名称失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // 设置可发现和可连接
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    ret = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置可发现/可连接失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // 设置PIN码
     esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_FIXED;
     esp_bt_pin_code_t pin_code = {'1', '2', '3', '4'};
-    esp_bt_gap_set_pin(pin_type, 4, pin_code);
+    ret = esp_bt_gap_set_pin(pin_type, 4, pin_code);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置PIN码失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     // 初始化HFP AG
     ret = esp_hf_ag_register_callback(hfp_ag_callback);
@@ -576,7 +640,7 @@ static esp_err_t bt_init(void)
         return ret;
     }
 
-    ESP_LOGI(TAG, "✓ 蓝牙手机模拟器初始化成功");
+    ESP_LOGI(TAG, "✓ 蓝牙手机模拟器初始化成功，设备名: %s", bt_name);
     return ESP_OK;
 }
 
@@ -620,24 +684,9 @@ static void button_task(void *arg)
             {
                 if (!bt_on)
                 {
-                    ESP_LOGI(TAG, "👆 启动蓝牙手机模拟器");
-                    led_mode = 0;
-
-                    esp_err_t ret = bt_init();
-                    if (ret == ESP_OK)
+                    esp_err_t ret = start_bt_phone();
+                    if (ret != ESP_OK)
                     {
-                        bt_on = true;
-                        led_mode = 1; // 蓝灯慢闪（待机）
-
-                        ESP_LOGI(TAG, "");
-                        ESP_LOGI(TAG, "🎉 蓝牙手机模拟器启动成功");
-                        ESP_LOGI(TAG, "📱 请在车机上搜索并连接: %s", bt_name);
-                        ESP_LOGI(TAG, "");
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "✗ 蓝牙启动失败: %s", esp_err_to_name(ret));
-                        led_mode = 5; // 红灯快闪
                         vTaskDelay(pdMS_TO_TICKS(2000));
                         led_mode = 0;
                     }
@@ -843,8 +892,14 @@ void app_main(void)
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
     xTaskCreate(switch_monitor_task, "switch", 4096, NULL, 5, NULL);
 
+    esp_err_t ret_bt = start_bt_phone();
+    if (ret_bt != ESP_OK)
+    {
+        ESP_LOGW(TAG, "⚠️ 开机自动启动蓝牙失败，可按BOOT键重试");
+    }
+
     ESP_LOGI(TAG, "💡 系统就绪");
-    ESP_LOGI(TAG, "💡 按BOOT键 (GPIO0) 启动蓝牙");
+    ESP_LOGI(TAG, "💡 上电后会自动启动蓝牙，BOOT键可手动重启");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
     ESP_LOGI(TAG, "💡 旋钮2: 1→0外拨, 2→0接听, 3→0挂断/拒接");
     ESP_LOGI(TAG, "");
