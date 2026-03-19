@@ -514,20 +514,35 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_CONNECTION_STATE_EVT:
     {
         uint8_t *bda = param->conn_stat.remote_bda;
-        ESP_LOGI(TAG, "HFP连接状态: %s [%02X:%02X:%02X:%02X:%02X:%02X]",
-                 (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED) ? "已连接" : "已断开",
+        ESP_LOGI(TAG, "HFP连接状态: state=%d, peer_feat=0x%" PRIx32 ", chld_feat=0x%" PRIx32 " [%02X:%02X:%02X:%02X:%02X:%02X]",
+                 param->conn_stat.state,
+                 param->conn_stat.peer_feat,
+                 param->conn_stat.chld_feat,
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
 
         if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED)
+        {
+            memcpy(connected_device, bda, 6);
+            led_mode = 2; // 先认为链路建立，但还未完成SLC
+            ESP_LOGI(TAG, "HFP RFCOMM已连接，等待SLC建立...");
+        }
+        else if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED)
         {
             hfp_connected = true;
             memcpy(connected_device, bda, 6);
             led_mode = 2; // 绿灯常亮
 
             ESP_LOGI(TAG, "");
-            ESP_LOGI(TAG, "🎉 HFP连接成功！");
+            ESP_LOGI(TAG, "🎉 HFP服务级连接(SLC)成功！");
             ESP_LOGI(TAG, "💡 按CALL_KEY (GPIO23) 模拟来电");
             ESP_LOGI(TAG, "");
+
+            esp_hf_ag_devices_status_indchange(
+                connected_device,
+                ESP_HF_CALL_STATUS_NO_CALLS,
+                ESP_HF_CALL_SETUP_STATUS_IDLE,
+                ESP_HF_NETWORK_STATE_AVAILABLE,
+                5);
         }
         else
         {
@@ -588,6 +603,43 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_BVRA_RESPONSE_EVT:
         ESP_LOGI(TAG, "语音识别: %s",
                  param->vra_rep.value ? "启用" : "禁用");
+        break;
+
+    case ESP_HF_CIND_RESPONSE_EVT:
+        ESP_LOGI(TAG, "HF请求CIND，返回空闲设备状态");
+        esp_hf_ag_cind_response(
+            param->cind_rep.remote_addr,
+            ESP_HF_CALL_STATUS_NO_CALLS,
+            ESP_HF_CALL_SETUP_STATUS_IDLE,
+            ESP_HF_NETWORK_STATE_AVAILABLE,
+            5,
+            0,
+            5,
+            0);
+        break;
+
+    case ESP_HF_COPS_RESPONSE_EVT:
+        ESP_LOGI(TAG, "HF请求运营商信息");
+        esp_hf_ag_cops_response(param->cops_rep.remote_addr, "ESP32 Phone");
+        break;
+
+    case ESP_HF_CNUM_RESPONSE_EVT:
+        ESP_LOGI(TAG, "HF请求本机号码");
+        esp_hf_ag_cnum_response(param->cnum_rep.remote_addr, DEFAULT_DIAL_NUMBER, 129, 0);
+        break;
+
+    case ESP_HF_CLCC_RESPONSE_EVT:
+        ESP_LOGI(TAG, "HF请求当前通话列表，当前返回空闲");
+        break;
+
+    case ESP_HF_UNAT_RESPONSE_EVT:
+        ESP_LOGW(TAG, "收到未知AT命令: %s", param->unat_rep.unat ? param->unat_rep.unat : "(null)");
+        esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
+        break;
+
+    case ESP_HF_IND_UPDATE_EVT:
+        ESP_LOGI(TAG, "HF请求更新指示器");
+        esp_hf_ag_ciev_report(param->ind_upd.remote_addr, param->ind_upd.ind_id, param->ind_upd.ind_value);
         break;
 
     default:
