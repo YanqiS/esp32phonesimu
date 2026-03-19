@@ -79,6 +79,47 @@ static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_
 static esp_err_t bt_init(void);
 static void bt_deinit(void);
 
+static esp_err_t configure_bt_identity(void)
+{
+    esp_err_t ret = esp_bt_gap_set_device_name(bt_name);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置蓝牙名称失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    esp_bt_cod_t cod = {
+        .major = ESP_BT_COD_MAJOR_DEV_PHONE,
+        .minor = 0,
+        .service = ESP_BT_COD_SRVC_TELEPHONY,
+    };
+    ret = esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_MAJOR_MINOR | ESP_BT_SET_COD_SERVICE_CLASS);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置设备类别(COD)失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置可发现/可连接失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_FIXED;
+    esp_bt_pin_code_t pin_code = {'1', '2', '3', '4'};
+    ret = esp_bt_gap_set_pin(pin_type, 4, pin_code);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "设置PIN码失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "✓ 设备身份已配置: name=%s, cod=phone/telephony, discoverable=yes", bt_name);
+    return ESP_OK;
+}
+
 static esp_err_t start_bt_phone(void)
 {
     if (bt_on)
@@ -455,6 +496,8 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             memset(connected_device, 0, 6);
             current_call_state = CALL_STATE_IDLE;
             led_mode = 1; // 蓝灯慢闪
+            esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+            ESP_LOGI(TAG, "HFP断开后恢复为可搜索状态，等待车机重新连接");
 
             // 停止RING
             if (ring_timer != NULL)
@@ -599,29 +642,9 @@ static esp_err_t bt_init(void)
     // 注册GAP回调
     esp_bt_gap_register_callback(bt_gap_cb);
 
-    // 设置蓝牙设备名称（使用新API）
-    ret = esp_bt_gap_set_device_name(bt_name);
+    ret = configure_bt_identity();
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "设置蓝牙名称失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 设置可发现和可连接
-    ret = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "设置可发现/可连接失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 设置PIN码
-    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_FIXED;
-    esp_bt_pin_code_t pin_code = {'1', '2', '3', '4'};
-    ret = esp_bt_gap_set_pin(pin_type, 4, pin_code);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "设置PIN码失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -641,6 +664,7 @@ static esp_err_t bt_init(void)
     }
 
     ESP_LOGI(TAG, "✓ 蓝牙手机模拟器初始化成功，设备名: %s", bt_name);
+    ESP_LOGI(TAG, "ℹ️ 手机可配对但通常不会建立HFP连接；车机/耳机等HF设备才会连接HFP AG");
     return ESP_OK;
 }
 
