@@ -78,6 +78,7 @@ static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_
 
 static esp_err_t bt_init(void);
 static void bt_deinit(void);
+static void bt_cleanup_partial_init(void);
 
 static esp_err_t configure_bt_identity(void)
 {
@@ -93,7 +94,7 @@ static esp_err_t configure_bt_identity(void)
         .minor = 0,
         .service = ESP_BT_COD_SRVC_TELEPHONY,
     };
-    ret = esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_MAJOR_MINOR | ESP_BT_SET_COD_SERVICE_CLASS);
+    ret = esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD);
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "设置设备类别(COD)失败: %s", esp_err_to_name(ret));
@@ -607,6 +608,9 @@ static void bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 static esp_err_t bt_init(void)
 {
     esp_err_t ret;
+    bool controller_enabled = false;
+    bool bluedroid_inited = false;
+    bool bluedroid_enabled = false;
 
     // 初始化蓝牙控制器
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -621,23 +625,26 @@ static esp_err_t bt_init(void)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "蓝牙控制器启用失败: %s", esp_err_to_name(ret));
-        return ret;
+        goto fail;
     }
+    controller_enabled = true;
 
     // 初始化Bluedroid
     ret = esp_bluedroid_init();
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "Bluedroid初始化失败: %s", esp_err_to_name(ret));
-        return ret;
+        goto fail;
     }
+    bluedroid_inited = true;
 
     ret = esp_bluedroid_enable();
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "Bluedroid启用失败: %s", esp_err_to_name(ret));
-        return ret;
+        goto fail;
     }
+    bluedroid_enabled = true;
 
     // 注册GAP回调
     esp_bt_gap_register_callback(bt_gap_cb);
@@ -645,7 +652,7 @@ static esp_err_t bt_init(void)
     ret = configure_bt_identity();
     if (ret != ESP_OK)
     {
-        return ret;
+        goto fail;
     }
 
     // 初始化HFP AG
@@ -653,19 +660,35 @@ static esp_err_t bt_init(void)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "HFP AG回调注册失败: %s", esp_err_to_name(ret));
-        return ret;
+        goto fail;
     }
 
     ret = esp_hf_ag_init();
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "HFP AG初始化失败: %s", esp_err_to_name(ret));
-        return ret;
+        goto fail;
     }
 
     ESP_LOGI(TAG, "✓ 蓝牙手机模拟器初始化成功，设备名: %s", bt_name);
     ESP_LOGI(TAG, "ℹ️ 手机可配对但通常不会建立HFP连接；车机/耳机等HF设备才会连接HFP AG");
     return ESP_OK;
+
+fail:
+    if (bluedroid_enabled)
+    {
+        esp_bluedroid_disable();
+    }
+    if (bluedroid_inited)
+    {
+        esp_bluedroid_deinit();
+    }
+    if (controller_enabled)
+    {
+        esp_bt_controller_disable();
+    }
+    bt_cleanup_partial_init();
+    return ret;
 }
 
 static void bt_deinit(void)
@@ -685,6 +708,26 @@ static void bt_deinit(void)
     current_call_state = CALL_STATE_IDLE;
 
     ESP_LOGI(TAG, "蓝牙已关闭");
+}
+
+static void bt_cleanup_partial_init(void)
+{
+    esp_bt_controller_status_t status = esp_bt_controller_get_status();
+
+    if (status == ESP_BT_CONTROLLER_STATUS_ENABLED)
+    {
+        esp_bt_controller_disable();
+        status = esp_bt_controller_get_status();
+    }
+
+    if (status == ESP_BT_CONTROLLER_STATUS_INITED)
+    {
+        esp_bt_controller_deinit();
+    }
+
+    bt_on = false;
+    hfp_connected = false;
+    current_call_state = CALL_STATE_IDLE;
 }
 
 /* ===================== 按键任务 ===================== */
