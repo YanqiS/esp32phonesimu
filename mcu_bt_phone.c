@@ -64,6 +64,7 @@ typedef enum {
     CALL_STATE_INCOMING,    // 来电中
     CALL_STATE_ACTIVE,      // 通话中
     CALL_STATE_DIALING,     // 拨号中
+    CALL_STATE_ALERTING,    // 对方振铃中
 } call_state_t;
 
 static call_state_t current_call_state = CALL_STATE_IDLE;
@@ -145,6 +146,21 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
             1,
             ESP_HF_CURRENT_CALL_DIRECTION_OUTGOING,
             ESP_HF_CURRENT_CALL_STATUS_ACTIVE,
+            ESP_HF_CURRENT_CALL_MODE_VOICE,
+            ESP_HF_CURRENT_CALL_MPTY_TYPE_SINGLE,
+            current_phone_number,
+            ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+        return;
+    }
+
+    if (current_call_state == CALL_STATE_ALERTING)
+    {
+        ESP_LOGI(TAG, "CLCC返回: 对方振铃 %s", current_phone_number);
+        esp_hf_ag_clcc_response(
+            remote_addr,
+            1,
+            ESP_HF_CURRENT_CALL_DIRECTION_OUTGOING,
+            ESP_HF_CURRENT_CALL_STATUS_ALERTING,
             ESP_HF_CURRENT_CALL_MODE_VOICE,
             ESP_HF_CURRENT_CALL_MPTY_TYPE_SINGLE,
             current_phone_number,
@@ -458,8 +474,8 @@ void handle_call_answer(void)
         connected_device,
         1,                                    // num_active=1 (1个活动呼叫)
         0,                                    // num_held=0
-        ESP_HF_CALL_STATUS_NO_CALLS,          // call_state
-        ESP_HF_CALL_SETUP_STATUS_IDLE,
+        ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
+        ESP_HF_CALL_SETUP_STATUS_NONE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -502,7 +518,7 @@ void handle_call_reject(void)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_IDLE,
+        ESP_HF_CALL_SETUP_STATUS_NONE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -541,7 +557,7 @@ void handle_call_hangup(void)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_IDLE,
+        ESP_HF_CALL_SETUP_STATUS_NONE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -590,7 +606,7 @@ void handle_call_dial(const char *number)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_IDLE,        // 使用IDLE，然后用ciev_report更新
+        ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING,
         (char *)number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -598,10 +614,19 @@ void handle_call_dial(const char *number)
     // 发送callsetup=2 (外拨中)
     sync_hfp_call_indicators(0, 2);
 
-    // 模拟对方接听（2秒后自动接通）
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
+    // 模拟对方振铃
+    vTaskDelay(pdMS_TO_TICKS(1000));
     if (current_call_state == CALL_STATE_DIALING)
+    {
+        current_call_state = CALL_STATE_ALERTING;
+        ESP_LOGI(TAG, "📞 对方振铃中...");
+        sync_hfp_call_indicators(0, 3);
+    }
+
+    // 模拟对方接听（再过1秒自动接通）
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    if (current_call_state == CALL_STATE_DIALING || current_call_state == CALL_STATE_ALERTING)
     {
         ESP_LOGI(TAG, "✅ 对方已接听");
         current_call_state = CALL_STATE_ACTIVE;
@@ -611,8 +636,8 @@ void handle_call_dial(const char *number)
             connected_device,
             1,                                // num_active=1
             0,
-            ESP_HF_CALL_STATUS_NO_CALLS,
-            ESP_HF_CALL_SETUP_STATUS_IDLE,
+            ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
+            ESP_HF_CALL_SETUP_STATUS_NONE,
             current_phone_number,
             ESP_HF_CALL_ADDR_TYPE_UNKNOWN
         );
@@ -721,10 +746,10 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 
     case ESP_HF_CIND_RESPONSE_EVT:
         ESP_LOGI(TAG, "HF请求CIND，返回空闲设备状态");
-        esp_hf_ag_cind_response(
+            esp_hf_ag_cind_response(
             param->cind_rep.remote_addr,
             ESP_HF_CALL_STATUS_NO_CALLS,
-            ESP_HF_CALL_SETUP_STATUS_IDLE,
+            ESP_HF_CALL_SETUP_STATUS_NONE,
             ESP_HF_NETWORK_STATE_AVAILABLE,
             5,
             0,
