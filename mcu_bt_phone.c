@@ -635,10 +635,6 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
         break;
 
-    case ESP_HF_IND_UPDATE_EVT:
-        ESP_LOGI(TAG, "HF请求更新指示器");
-        break;
-
     default:
         ESP_LOGD(TAG, "HFP未处理事件: %d", event);
         break;
