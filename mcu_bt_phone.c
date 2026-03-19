@@ -16,6 +16,8 @@
 #include "esp_mac.h"
 
 // HFP AG (手机端)
+#include "esp_a2dp_api.h"
+#include "esp_avrc_api.h"
 #include "esp_hf_ag_api.h"
 
 #define TAG "BT_PHONE"
@@ -49,6 +51,8 @@ static char my_mac_id[8];
 static char bt_name[32];
 static bool bt_on = false;
 static int led_mode = 0;
+static bool a2dp_connected = false;
+static bool avrcp_connected = false;
 
 // HFP连接状态
 static bool hfp_connected = false;
@@ -148,6 +152,40 @@ static esp_err_t start_bt_phone(void)
     ESP_LOGE(TAG, "✗ 蓝牙启动失败: %s", esp_err_to_name(ret));
     led_mode = 5; // 红灯快闪
     return ret;
+}
+
+static void a2dp_source_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
+{
+    switch (event)
+    {
+    case ESP_A2D_CONNECTION_STATE_EVT:
+        a2dp_connected = (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED);
+        ESP_LOGI(TAG, "A2DP连接状态: %d", param->conn_stat.state);
+        break;
+    case ESP_A2D_AUDIO_STATE_EVT:
+        ESP_LOGI(TAG, "A2DP音频状态: %d", param->audio_stat.state);
+        break;
+    default:
+        ESP_LOGD(TAG, "A2DP事件: %d", event);
+        break;
+    }
+}
+
+static void avrc_tg_callback(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param)
+{
+    switch (event)
+    {
+    case ESP_AVRC_TG_CONNECTION_STATE_EVT:
+        avrcp_connected = param->conn_stat.connected;
+        ESP_LOGI(TAG, "AVRCP TG连接状态: %d", param->conn_stat.connected);
+        break;
+    case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
+        ESP_LOGI(TAG, "AVRCP音量命令: %d", param->set_abs_vol.volume);
+        break;
+    default:
+        ESP_LOGD(TAG, "AVRCP TG事件: %d", event);
+        break;
+    }
 }
 
 /* ===================== LED控制 ===================== */
@@ -611,6 +649,8 @@ static esp_err_t bt_init(void)
     bool controller_enabled = false;
     bool bluedroid_inited = false;
     bool bluedroid_enabled = false;
+    bool avrc_tg_inited = false;
+    bool a2dp_inited = false;
 
     // 初始化蓝牙控制器
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -655,6 +695,26 @@ static esp_err_t bt_init(void)
         goto fail;
     }
 
+    // 车机通常会把“手机”当作 A2DP Source + AVRCP Target + HFP AG 的组合设备看待。
+    // 仅暴露 HFP AG 时，部分车机会因为缺少 AVDTP(PSM 25) 服务而主动断开。
+    ret = esp_avrc_tg_init();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "AVRCP TG初始化失败: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+    esp_avrc_tg_register_callback(avrc_tg_callback);
+    avrc_tg_inited = true;
+
+    esp_a2d_register_callback(a2dp_source_callback);
+    ret = esp_a2d_source_init();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "A2DP Source初始化失败: %s", esp_err_to_name(ret));
+        goto fail;
+    }
+    a2dp_inited = true;
+
     // 初始化HFP AG
     ret = esp_hf_ag_register_callback(hfp_ag_callback);
     if (ret != ESP_OK)
@@ -675,6 +735,14 @@ static esp_err_t bt_init(void)
     return ESP_OK;
 
 fail:
+    if (a2dp_inited)
+    {
+        esp_a2d_source_deinit();
+    }
+    if (avrc_tg_inited)
+    {
+        esp_avrc_tg_deinit();
+    }
     if (bluedroid_enabled)
     {
         esp_bluedroid_disable();
@@ -695,6 +763,8 @@ static void bt_deinit(void)
 {
     // 关闭HFP AG
     esp_hf_ag_deinit();
+    esp_a2d_source_deinit();
+    esp_avrc_tg_deinit();
 
     // 关闭Bluedroid
     esp_bluedroid_disable();
@@ -727,6 +797,8 @@ static void bt_cleanup_partial_init(void)
 
     bt_on = false;
     hfp_connected = false;
+    a2dp_connected = false;
+    avrcp_connected = false;
     current_call_state = CALL_STATE_IDLE;
 }
 
