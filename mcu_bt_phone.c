@@ -101,6 +101,19 @@ static const char *lookup_contact_name(const char *number)
     return NULL;
 }
 
+static void sync_hfp_call_indicators(int call, int callsetup)
+{
+    if (!hfp_connected)
+    {
+        return;
+    }
+
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, call);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, callsetup);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);
+}
+
 static void respond_current_calls(esp_bd_addr_t remote_addr)
 {
     if (!hfp_connected)
@@ -111,6 +124,7 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
 
     if (current_call_state == CALL_STATE_DIALING)
     {
+        ESP_LOGI(TAG, "CLCC返回: 外拨中 %s", current_phone_number);
         esp_hf_ag_clcc_response(
             remote_addr,
             1,
@@ -125,6 +139,7 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
 
     if (current_call_state == CALL_STATE_ACTIVE)
     {
+        ESP_LOGI(TAG, "CLCC返回: 通话中 %s", current_phone_number);
         esp_hf_ag_clcc_response(
             remote_addr,
             1,
@@ -139,6 +154,7 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
 
     if (current_call_state == CALL_STATE_INCOMING)
     {
+        ESP_LOGI(TAG, "CLCC返回: 来电中 %s", current_phone_number);
         esp_hf_ag_clcc_response(
             remote_addr,
             1,
@@ -397,10 +413,7 @@ void simulate_incoming_call(const char *phone_number)
 
     // 发送状态指示 - 来电中
     // 使用ciev_report发送单独的指示器
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);           // call=0 (无活动呼叫)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 1);      // callsetup=1 (来电中)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);        // service=1 (有网络)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);         // signal=5 (满格信号)
+    sync_hfp_call_indicators(0, 1);
 
     // 启动RING定时器（每3秒发送一次）
     if (ring_timer == NULL)
@@ -452,8 +465,7 @@ void handle_call_answer(void)
     );
 
     // 发送呼叫状态更新
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);         // call=1 (有活动呼叫)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);    // callsetup=0 (无呼叫建立中)
+    sync_hfp_call_indicators(1, 0);
 
     // 建立SCO音频连接
     esp_hf_ag_audio_connect(connected_device);
@@ -495,6 +507,8 @@ void handle_call_reject(void)
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
 
+    sync_hfp_call_indicators(0, 0);
+
     memset(current_phone_number, 0, sizeof(current_phone_number));
     ESP_LOGI(TAG, "📵 来电已拒绝");
 }
@@ -531,6 +545,8 @@ void handle_call_hangup(void)
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
+
+    sync_hfp_call_indicators(0, 0);
 
     // 断开SCO音频
     esp_hf_ag_audio_disconnect(connected_device);
@@ -580,7 +596,7 @@ void handle_call_dial(const char *number)
     );
 
     // 发送callsetup=2 (外拨中)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 2);
+    sync_hfp_call_indicators(0, 2);
 
     // 模拟对方接听（2秒后自动接通）
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -602,8 +618,7 @@ void handle_call_dial(const char *number)
         );
 
         // 更新呼叫状态
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);      // call=1 (有活动呼叫)
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0); // callsetup=0 (空闲)
+        sync_hfp_call_indicators(1, 0);
 
         esp_hf_ag_audio_connect(connected_device);
     }
@@ -641,10 +656,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             ESP_LOGI(TAG, "💡 按CALL_KEY (GPIO23) 模拟来电");
             ESP_LOGI(TAG, "");
 
-            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
-            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
-            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);
-            esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);
+            sync_hfp_call_indicators(0, 0);
         }
         else
         {
@@ -1079,8 +1091,7 @@ static void switch_monitor_task(void *arg)
                         ESP_HF_CALL_SETUP_STATUS_IDLE,
                         current_phone_number,
                         ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
-                    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
-                    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+                    sync_hfp_call_indicators(0, 0);
                     esp_hf_ag_audio_disconnect(connected_device);
                     memset(current_phone_number, 0, sizeof(current_phone_number));
                     ESP_LOGI(TAG, "📵 外拨已取消");
