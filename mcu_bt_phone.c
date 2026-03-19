@@ -1062,7 +1062,7 @@ static void button_task(void *arg)
 static void switch_monitor_task(void *arg)
 {
     int last_right = -1;
-    int pending_action = 0;
+    int max_seen_position = 0;
 
     while (1)
     {
@@ -1072,28 +1072,31 @@ static void switch_monitor_task(void *arg)
         {
             ESP_LOGI(TAG, "旋钮2: %d", right);
 
-            if (pending_action == 0 && right == 0)
+            if (max_seen_position == 0 && right == 0)
             {
                 // 初始态
             }
             else if (right >= 1 && right <= 3)
             {
-                pending_action = right;
-                ESP_LOGI(TAG, "[旋钮2] 检测到转到位置%d", right);
+                if (right > max_seen_position)
+                {
+                    max_seen_position = right;
+                    ESP_LOGI(TAG, "[旋钮2] 当前最高挡位=%d", max_seen_position);
+                }
             }
-            else if (pending_action == 1 && right == 0)
+            else if (max_seen_position == 1 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发外拨: %s", DEFAULT_DIAL_NUMBER);
                 handle_call_dial(DEFAULT_DIAL_NUMBER);
-                pending_action = 0;
+                max_seen_position = 0;
             }
-            else if (pending_action == 2 && right == 0)
+            else if (max_seen_position == 2 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发接听");
                 handle_call_answer();
-                pending_action = 0;
+                max_seen_position = 0;
             }
-            else if (pending_action == 3 && right == 0)
+            else if (max_seen_position >= 3 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发挂断/拒接");
                 if (current_call_state == CALL_STATE_INCOMING)
@@ -1125,17 +1128,17 @@ static void switch_monitor_task(void *arg)
                 {
                     ESP_LOGW(TAG, "❌ 当前没有可挂断的呼叫");
                 }
-                pending_action = 0;
+                max_seen_position = 0;
             }
             else
             {
                 if (right == 0)
                 {
-                    pending_action = 0;
+                    max_seen_position = 0;
                 }
                 else
                 {
-                    ESP_LOGI(TAG, "[旋钮2] 等待回到0触发动作");
+                    ESP_LOGI(TAG, "[旋钮2] 经过中间挡位%d，等待回到0触发最高挡位=%d", right, max_seen_position);
                 }
             }
 
