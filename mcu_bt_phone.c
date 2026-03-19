@@ -53,6 +53,7 @@ static bool bt_on = false;
 static int led_mode = 0;
 static bool a2dp_connected = false;
 static bool avrcp_connected = false;
+static int negotiated_hfp_codec = -1;
 
 // HFP连接状态
 static bool hfp_connected = false;
@@ -748,6 +749,16 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
                  param->vra_rep.value ? "启用" : "禁用");
         break;
 
+    case ESP_HF_BCS_RESPONSE_EVT:
+        negotiated_hfp_codec = param->bcs_rep.mode;
+        ESP_LOGI(TAG, "HFP音频编解码协商结果(mode=%d)", param->bcs_rep.mode);
+        break;
+
+    case ESP_HF_WBS_RESPONSE_EVT:
+        negotiated_hfp_codec = param->wbs_rep.codec;
+        ESP_LOGI(TAG, "HFP宽带语音状态(codec=%d)", param->wbs_rep.codec);
+        break;
+
     case ESP_HF_CIND_RESPONSE_EVT:
         ESP_LOGI(TAG, "HF请求CIND，返回空闲设备状态");
             esp_hf_ag_cind_response(
@@ -859,6 +870,16 @@ static esp_err_t bt_init(void)
         goto fail;
     }
     controller_enabled = true;
+
+    ret = esp_bredr_sco_datapath_set(ESP_SCO_DATA_PATH_HCI);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "设置SCO数据路径失败: %s", esp_err_to_name(ret));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "✓ SCO数据路径已设置为HCI");
+    }
 
     // 初始化Bluedroid
     ret = esp_bluedroid_init();
@@ -990,6 +1011,7 @@ static void bt_cleanup_partial_init(void)
     hfp_connected = false;
     a2dp_connected = false;
     avrcp_connected = false;
+    negotiated_hfp_codec = -1;
     current_call_state = CALL_STATE_IDLE;
 }
 
