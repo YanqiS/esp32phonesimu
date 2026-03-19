@@ -70,6 +70,90 @@ static call_state_t current_call_state = CALL_STATE_IDLE;
 static char current_phone_number[32] = "";
 static TimerHandle_t ring_timer = NULL;
 
+typedef struct
+{
+    const char *name;
+    const char *number;
+} contact_t;
+
+static const contact_t phonebook[] = {
+    {"张三", "13800138000"},
+    {"李四", "13501693774"},
+    {"王五", "13600136000"},
+    {"赵六", "13700137000"},
+};
+
+static const char *lookup_contact_name(const char *number)
+{
+    if (number == NULL || number[0] == '\0')
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < sizeof(phonebook) / sizeof(phonebook[0]); ++i)
+    {
+        if (strcmp(phonebook[i].number, number) == 0)
+        {
+            return phonebook[i].name;
+        }
+    }
+
+    return NULL;
+}
+
+static void respond_current_calls(esp_bd_addr_t remote_addr)
+{
+    if (!hfp_connected)
+    {
+        ESP_LOGW(TAG, "SLC未建立，跳过CLCC响应");
+        return;
+    }
+
+    if (current_call_state == CALL_STATE_DIALING)
+    {
+        esp_hf_ag_clcc_response(
+            remote_addr,
+            1,
+            ESP_HF_CURRENT_CALL_DIRECTION_OUTGOING,
+            ESP_HF_CURRENT_CALL_STATUS_DIALING,
+            ESP_HF_CURRENT_CALL_MODE_VOICE,
+            ESP_HF_CURRENT_CALL_MPTY_TYPE_SINGLE,
+            current_phone_number,
+            ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+        return;
+    }
+
+    if (current_call_state == CALL_STATE_ACTIVE)
+    {
+        esp_hf_ag_clcc_response(
+            remote_addr,
+            1,
+            ESP_HF_CURRENT_CALL_DIRECTION_OUTGOING,
+            ESP_HF_CURRENT_CALL_STATUS_ACTIVE,
+            ESP_HF_CURRENT_CALL_MODE_VOICE,
+            ESP_HF_CURRENT_CALL_MPTY_TYPE_SINGLE,
+            current_phone_number,
+            ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+        return;
+    }
+
+    if (current_call_state == CALL_STATE_INCOMING)
+    {
+        esp_hf_ag_clcc_response(
+            remote_addr,
+            1,
+            ESP_HF_CURRENT_CALL_DIRECTION_INCOMING,
+            ESP_HF_CURRENT_CALL_STATUS_INCOMING,
+            ESP_HF_CURRENT_CALL_MODE_VOICE,
+            ESP_HF_CURRENT_CALL_MPTY_TYPE_SINGLE,
+            current_phone_number,
+            ESP_HF_CALL_ADDR_TYPE_UNKNOWN);
+        return;
+    }
+
+    ESP_LOGI(TAG, "当前没有活动呼叫，CLCC返回空列表");
+}
+
 static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_t bit8)
 {
     int val = 0;
@@ -297,6 +381,11 @@ void simulate_incoming_call(const char *phone_number)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "📞 ========== 模拟来电 ==========");
     ESP_LOGI(TAG, "📞 来电号码: %s", phone_number);
+    const char *name = lookup_contact_name(phone_number);
+    if (name != NULL)
+    {
+        ESP_LOGI(TAG, "📞 联系人: %s", name);
+    }
     ESP_LOGI(TAG, "📞 ===============================");
 
     // 保存电话号码
@@ -335,6 +424,11 @@ void handle_call_answer(void)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "✅ ========== 接听来电 ==========");
     ESP_LOGI(TAG, "✅ 电话号码: %s", current_phone_number);
+    const char *name = lookup_contact_name(current_phone_number);
+    if (name != NULL)
+    {
+        ESP_LOGI(TAG, "✅ 联系人: %s", name);
+    }
     ESP_LOGI(TAG, "✅ ===============================");
 
     // 停止RING
@@ -417,6 +511,11 @@ void handle_call_hangup(void)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "📴 ========== 结束通话 ==========");
     ESP_LOGI(TAG, "📴 电话号码: %s", current_phone_number);
+    const char *name = lookup_contact_name(current_phone_number);
+    if (name != NULL)
+    {
+        ESP_LOGI(TAG, "📴 联系人: %s", name);
+    }
     ESP_LOGI(TAG, "📴 ===============================");
 
     current_call_state = CALL_STATE_IDLE;
@@ -458,6 +557,11 @@ void handle_call_dial(const char *number)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "📞 ========== 外拨电话 ==========");
     ESP_LOGI(TAG, "📞 拨号: %s", number);
+    const char *name = lookup_contact_name(number);
+    if (name != NULL)
+    {
+        ESP_LOGI(TAG, "📞 联系人: %s", name);
+    }
     ESP_LOGI(TAG, "📞 ===============================");
 
     strncpy(current_phone_number, number, sizeof(current_phone_number) - 1);
@@ -627,7 +731,8 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         break;
 
     case ESP_HF_CLCC_RESPONSE_EVT:
-        ESP_LOGI(TAG, "HF请求当前通话列表，当前返回空闲");
+        ESP_LOGI(TAG, "HF请求当前通话列表");
+        respond_current_calls(param->clcc_rep.remote_addr);
         break;
 
     case ESP_HF_UNAT_RESPONSE_EVT:
