@@ -1062,7 +1062,7 @@ static void button_task(void *arg)
 static void switch_monitor_task(void *arg)
 {
     int last_right = -1;
-    int knob_state = 0;
+    int pending_action = 0;
 
     while (1)
     {
@@ -1072,28 +1072,28 @@ static void switch_monitor_task(void *arg)
         {
             ESP_LOGI(TAG, "旋钮2: %d", right);
 
-            if (knob_state == 0 && right == 0)
+            if (pending_action == 0 && right == 0)
             {
                 // 初始态
             }
-            else if (knob_state == 0 && right >= 1 && right <= 3)
+            else if (right >= 1 && right <= 3)
             {
-                knob_state = right;
+                pending_action = right;
                 ESP_LOGI(TAG, "[旋钮2] 检测到转到位置%d", right);
             }
-            else if (knob_state == 1 && right == 0)
+            else if (pending_action == 1 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发外拨: %s", DEFAULT_DIAL_NUMBER);
                 handle_call_dial(DEFAULT_DIAL_NUMBER);
-                knob_state = 0;
+                pending_action = 0;
             }
-            else if (knob_state == 2 && right == 0)
+            else if (pending_action == 2 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发接听");
                 handle_call_answer();
-                knob_state = 0;
+                pending_action = 0;
             }
-            else if (knob_state == 3 && right == 0)
+            else if (pending_action == 3 && right == 0)
             {
                 ESP_LOGI(TAG, "📞 [旋钮2] 触发挂断/拒接");
                 if (current_call_state == CALL_STATE_INCOMING)
@@ -1125,12 +1125,18 @@ static void switch_monitor_task(void *arg)
                 {
                     ESP_LOGW(TAG, "❌ 当前没有可挂断的呼叫");
                 }
-                knob_state = 0;
+                pending_action = 0;
             }
             else
             {
-                knob_state = 0;
-                ESP_LOGI(TAG, "[旋钮2] 状态重置");
+                if (right == 0)
+                {
+                    pending_action = 0;
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "[旋钮2] 等待回到0触发动作");
+                }
             }
 
             last_right = right;
