@@ -475,7 +475,7 @@ void handle_call_answer(void)
         1,                                    // num_active=1 (1个活动呼叫)
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
-        ESP_HF_CALL_SETUP_STATUS_NONE,
+        ESP_HF_CALL_SETUP_STATUS_IDLE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -518,7 +518,7 @@ void handle_call_reject(void)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_NONE,
+        ESP_HF_CALL_SETUP_STATUS_IDLE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -557,7 +557,7 @@ void handle_call_hangup(void)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_NONE,
+        ESP_HF_CALL_SETUP_STATUS_IDLE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -637,7 +637,7 @@ void handle_call_dial(const char *number)
             1,                                // num_active=1
             0,
             ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
-            ESP_HF_CALL_SETUP_STATUS_NONE,
+            ESP_HF_CALL_SETUP_STATUS_IDLE,
             current_phone_number,
             ESP_HF_CALL_ADDR_TYPE_UNKNOWN
         );
@@ -749,7 +749,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             esp_hf_ag_cind_response(
             param->cind_rep.remote_addr,
             ESP_HF_CALL_STATUS_NO_CALLS,
-            ESP_HF_CALL_SETUP_STATUS_NONE,
+            ESP_HF_CALL_SETUP_STATUS_IDLE,
             ESP_HF_NETWORK_STATE_AVAILABLE,
             5,
             0,
