@@ -1,5 +1,7 @@
 #include <string.h>
 #include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -19,6 +21,7 @@
 #include "esp_hf_ag_api.h"
 
 #define TAG "BT_PHONE"
+#define ENABLE_UART_CMD_TASK 0
 
 // ========== 引脚定义 ==========
 // LED指示灯
@@ -51,6 +54,76 @@ typedef enum {
 static call_state_t current_call_state = CALL_STATE_IDLE;
 static char current_phone_number[32] = "";
 static TimerHandle_t ring_timer = NULL;
+
+static esp_err_t bt_init(void);
+static void bt_deinit(void);
+
+// 自动化测试参数
+typedef struct {
+    int rounds;
+    int interval_ms;
+} conn_stress_cfg_t;
+
+typedef struct {
+    char number[32];
+    char name[32];
+} contact_t;
+
+#define MAX_CONTACTS 20
+static contact_t contacts[MAX_CONTACTS];
+static size_t contacts_count = 0;
+
+
+static const char *lookup_contact_name(const char *number)
+{
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        if (strcmp(contacts[i].number, number) == 0)
+        {
+            return contacts[i].name;
+        }
+    }
+    return NULL;
+}
+
+static bool add_contact(const char *number, const char *name)
+{
+    if (!number || !name || number[0] == '\0' || name[0] == '\0')
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        if (strcmp(contacts[i].number, number) == 0)
+        {
+            strncpy(contacts[i].name, name, sizeof(contacts[i].name) - 1);
+            contacts[i].name[sizeof(contacts[i].name) - 1] = '\0';
+            return true;
+        }
+    }
+
+    if (contacts_count >= MAX_CONTACTS)
+    {
+        return false;
+    }
+
+    strncpy(contacts[contacts_count].number, number, sizeof(contacts[contacts_count].number) - 1);
+    contacts[contacts_count].number[sizeof(contacts[contacts_count].number) - 1] = '\0';
+    strncpy(contacts[contacts_count].name, name, sizeof(contacts[contacts_count].name) - 1);
+    contacts[contacts_count].name[sizeof(contacts[contacts_count].name) - 1] = '\0';
+    contacts_count++;
+    return true;
+}
+
+static void dump_contacts(void)
+{
+    ESP_LOGI(TAG, "通讯录条目: %u", (unsigned)contacts_count);
+    for (size_t i = 0; i < contacts_count; ++i)
+    {
+        ESP_LOGI(TAG, "[%u] %s -> %s", (unsigned)i, contacts[i].number, contacts[i].name);
+    }
+}
 
 /* ===================== LED控制 ===================== */
 
@@ -161,6 +234,11 @@ void simulate_incoming_call(const char *phone_number)
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "📞 ========== 模拟来电 ==========");
     ESP_LOGI(TAG, "📞 来电号码: %s", phone_number);
+    const char *caller_name = lookup_contact_name(phone_number);
+    if (caller_name)
+    {
+        ESP_LOGI(TAG, "📇 联系人: %s", caller_name);
+    }
     ESP_LOGI(TAG, "📞 ===============================");
 
     // 保存电话号码
@@ -367,6 +445,94 @@ void handle_call_dial(const char *number)
 
         esp_hf_ag_audio_connect(connected_device);
     }
+}
+
+static void force_disconnect_hfp(void)
+{
+    if (!bt_on)
+    {
+        ESP_LOGW(TAG, "蓝牙未开启，无法断开");
+        return;
+    }
+
+    if (!hfp_connected)
+    {
+        ESP_LOGW(TAG, "当前未连接，无需断开");
+        return;
+    }
+
+    // ESP-IDF v5.4 的 HFP AG API 未提供主动断开指定连接的接口，
+    // 通过重启BT协议栈实现“强制断连”，并恢复到可连接状态。
+    ESP_LOGI(TAG, "🔌 通过重启蓝牙协议栈强制断开HFP连接");
+    bt_deinit();
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    esp_err_t ret = bt_init();
+    if (ret == ESP_OK)
+    {
+        bt_on = true;
+        led_mode = 1;
+        ESP_LOGI(TAG, "✅ 已完成强制断连，等待车机重新连接");
+    }
+    else
+    {
+        bt_on = false;
+        led_mode = 5;
+        ESP_LOGE(TAG, "❌ 蓝牙重启失败: %s", esp_err_to_name(ret));
+    }
+}
+
+static void conn_stress_task(void *arg)
+{
+    conn_stress_cfg_t cfg = *(conn_stress_cfg_t *)arg;
+    free(arg);
+
+    ESP_LOGI(TAG, "🚦 开始连接稳定性测试: rounds=%d interval=%dms", cfg.rounds, cfg.interval_ms);
+
+    for (int i = 0; i < cfg.rounds; ++i)
+    {
+        ESP_LOGI(TAG, "[%d/%d] 触发断连", i + 1, cfg.rounds);
+        force_disconnect_hfp();
+        vTaskDelay(pdMS_TO_TICKS(cfg.interval_ms));
+
+        ESP_LOGI(TAG, "[%d/%d] 保持可连接状态，等待车机自动回连", i + 1, cfg.rounds);
+        vTaskDelay(pdMS_TO_TICKS(cfg.interval_ms));
+    }
+
+    ESP_LOGI(TAG, "✅ 连接稳定性测试结束");
+    vTaskDelete(NULL);
+}
+
+static void print_uart_help(void)
+{
+    ESP_LOGI(TAG, "\n====== 串口命令 ======");
+    ESP_LOGI(TAG, "help                               : 查看帮助");
+    ESP_LOGI(TAG, "incoming <num>                     : 触发来电");
+    ESP_LOGI(TAG, "add_contact <num> <name>           : 添加/更新本地联系人");
+    ESP_LOGI(TAG, "contacts                           : 打印本地联系人");
+    ESP_LOGI(TAG, "dial <num>                         : 模拟外拨");
+    ESP_LOGI(TAG, "answer | reject | hangup           : 接听/拒接/挂断");
+    ESP_LOGI(TAG, "disconnect                         : 主动断开HFP连接");
+    ESP_LOGI(TAG, "rebootbt                           : 重启蓝牙协议栈");
+    ESP_LOGI(TAG, "stress_conn <rounds> <interval_ms> : 断连/回连压力测试");
+    ESP_LOGI(TAG, "state                              : 打印当前状态");
+    ESP_LOGI(TAG, "note: 暂不支持PBAP通讯录同步，仅支持本地联系人映射");
+    ESP_LOGI(TAG, "======================\n");
+}
+
+static void log_current_state(void)
+{
+    ESP_LOGI(TAG, "状态: bt_on=%d hfp_connected=%d call_state=%d number=%s",
+             bt_on, hfp_connected, current_call_state,
+             current_phone_number[0] ? current_phone_number : "<none>");
+}
+
+static void uart_cmd_task(void *arg)
+{
+    (void)arg;
+    print_uart_help();
+    ESP_LOGW(TAG, "UART命令任务默认关闭（ENABLE_UART_CMD_TASK=0），避免与控制台串口冲突导致复位");
+    vTaskDelete(NULL);
 }
 
 /* ===================== HFP AG事件回调 ===================== */
@@ -714,12 +880,20 @@ void app_main(void)
     };
     gpio_config(&call_conf);
 
+    add_contact("13800138000", "Alice");
+    add_contact("13900139000", "Bob");
+
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
+    if (ENABLE_UART_CMD_TASK)
+    {
+        xTaskCreate(uart_cmd_task, "uart_cmd", 4096, NULL, 4, NULL);
+    }
 
     ESP_LOGI(TAG, "💡 系统就绪");
     ESP_LOGI(TAG, "💡 按BOOT键 (GPIO0) 启动蓝牙");
     ESP_LOGI(TAG, "💡 按CALL键 (GPIO23) 模拟来电");
+    ESP_LOGI(TAG, "💡 串口命令任务默认关闭，如需开启请设置 ENABLE_UART_CMD_TASK=1");
     ESP_LOGI(TAG, "");
 }
