@@ -55,6 +55,18 @@ static bool a2dp_connected = false;
 static bool avrcp_connected = false;
 static int negotiated_hfp_codec = -1;
 
+#ifdef CONFIG_BT_HFP_WBS_ENABLE
+static const bool hfp_wbs_enabled = true;
+#else
+static const bool hfp_wbs_enabled = false;
+#endif
+
+#ifdef CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI
+static const char *hfp_audio_path = "HCI";
+#else
+static const char *hfp_audio_path = "PCM/Other";
+#endif
+
 // HFP连接状态
 static bool hfp_connected = false;
 static esp_bd_addr_t connected_device = {0};
@@ -752,6 +764,10 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_BCS_RESPONSE_EVT:
         negotiated_hfp_codec = param->bcs_rep.mode;
         ESP_LOGI(TAG, "HFP音频编解码协商结果(mode=%d)", param->bcs_rep.mode);
+        if (param->bcs_rep.mode != 1)
+        {
+            ESP_LOGW(TAG, "⚠️ 当前协商到的不是CVSD，说明固件/车机仍可能在走宽带语音路径");
+        }
         break;
 
     case ESP_HF_WBS_RESPONSE_EVT:
@@ -1207,6 +1223,8 @@ void app_main(void)
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "  设备名: %s", bt_name);
     ESP_LOGI(TAG, "  PIN码: 1234");
+    ESP_LOGI(TAG, "  HFP WBS: %s", hfp_wbs_enabled ? "ENABLED" : "DISABLED");
+    ESP_LOGI(TAG, "  HFP音频路径: %s", hfp_audio_path);
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
 
