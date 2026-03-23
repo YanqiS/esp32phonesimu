@@ -69,3 +69,11 @@
 - 覆盖所有电话与媒体联动场景；
 
 那么大概率还需要继续补蓝牙画像与协议细节，而不只是 HFP AG 单点可用。
+
+## menuconfig 调整建议
+- 可以，**这个问题非常适合先从 `menuconfig` 下手**。当前仓库已经通过 `sdkconfig.defaults` 默认关闭了 HFP 宽带语音并把音频数据路径设为 HCI。
+- 你本地可以优先检查或调整这两项：
+  - `Component config -> Bluetooth -> Bluedroid Options -> HFP wide band speech`：建议先关闭，避免走 mSBC / eSCO。
+  - `Component config -> Bluetooth -> Bluedroid Options -> HFP audio data path`：建议使用 `HCI`。
+- 如果你修改过 `sdkconfig`，请在重新构建前执行 `idf.py fullclean`，否则旧配置可能继续生效。
+- 如果后续确认车机其实支持更高规格音频，再考虑重新打开 WBS 做对比。
