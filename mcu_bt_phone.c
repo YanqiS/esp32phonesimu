@@ -199,6 +199,32 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
     ESP_LOGI(TAG, "当前没有活动呼叫，CLCC返回空列表");
 }
 
+static bool send_known_at_identity_response(esp_bd_addr_t remote_addr, const char *unat)
+{
+    if (unat == NULL)
+    {
+        return false;
+    }
+
+    if (strcmp(unat, "+CGMI") == 0)
+    {
+        esp_hf_ag_unknown_at_send(remote_addr, "\r\nESP32 Labs\r\n");
+        return true;
+    }
+    if (strcmp(unat, "+CGMM") == 0)
+    {
+        esp_hf_ag_unknown_at_send(remote_addr, "\r\nESP32 Phone Simulator\r\n");
+        return true;
+    }
+    if (strcmp(unat, "+CGMR") == 0)
+    {
+        esp_hf_ag_unknown_at_send(remote_addr, "\r\nFW 1.0\r\n");
+        return true;
+    }
+
+    return false;
+}
+
 static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_t bit8)
 {
     int val = 0;
@@ -805,7 +831,10 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 
     case ESP_HF_UNAT_RESPONSE_EVT:
         ESP_LOGW(TAG, "收到未知AT命令: %s", param->unat_rep.unat ? param->unat_rep.unat : "(null)");
-        esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
+        if (!send_known_at_identity_response(param->unat_rep.remote_addr, param->unat_rep.unat))
+        {
+            esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
+        }
         break;
 
     default:
@@ -1101,6 +1130,34 @@ static void button_task(void *arg)
     }
 }
 
+static void call_state_sync_task(void *arg)
+{
+    while (1)
+    {
+        if (hfp_connected)
+        {
+            if (current_call_state == CALL_STATE_INCOMING)
+            {
+                sync_hfp_call_indicators(0, 1);
+            }
+            else if (current_call_state == CALL_STATE_DIALING)
+            {
+                sync_hfp_call_indicators(0, 2);
+            }
+            else if (current_call_state == CALL_STATE_ALERTING)
+            {
+                sync_hfp_call_indicators(0, 3);
+            }
+            else if (current_call_state == CALL_STATE_ACTIVE)
+            {
+                sync_hfp_call_indicators(1, 0);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
 static void switch_monitor_task(void *arg)
 {
     int last_right = -1;
@@ -1273,6 +1330,7 @@ void app_main(void)
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
+    xTaskCreate(call_state_sync_task, "call_sync", 3072, NULL, 5, NULL);
     xTaskCreate(switch_monitor_task, "switch", 4096, NULL, 5, NULL);
 
     esp_err_t ret_bt = start_bt_phone();
