@@ -55,18 +55,6 @@ static bool a2dp_connected = false;
 static bool avrcp_connected = false;
 static int negotiated_hfp_codec = -1;
 
-#ifdef CONFIG_BT_HFP_WBS_ENABLE
-static const bool hfp_wbs_enabled = true;
-#else
-static const bool hfp_wbs_enabled = false;
-#endif
-
-#ifdef CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI
-static const char *hfp_audio_path = "HCI";
-#else
-static const char *hfp_audio_path = "PCM/Other";
-#endif
-
 // HFP连接状态
 static bool hfp_connected = false;
 static esp_bd_addr_t connected_device = {0};
@@ -197,32 +185,6 @@ static void respond_current_calls(esp_bd_addr_t remote_addr)
     }
 
     ESP_LOGI(TAG, "当前没有活动呼叫，CLCC返回空列表");
-}
-
-static bool send_known_at_identity_response(esp_bd_addr_t remote_addr, const char *unat)
-{
-    if (unat == NULL)
-    {
-        return false;
-    }
-
-    if (strcmp(unat, "+CGMI") == 0)
-    {
-        esp_hf_ag_unknown_at_send(remote_addr, "\r\nESP32 Labs\r\n");
-        return true;
-    }
-    if (strcmp(unat, "+CGMM") == 0)
-    {
-        esp_hf_ag_unknown_at_send(remote_addr, "\r\nESP32 Phone Simulator\r\n");
-        return true;
-    }
-    if (strcmp(unat, "+CGMR") == 0)
-    {
-        esp_hf_ag_unknown_at_send(remote_addr, "\r\nFW 1.0\r\n");
-        return true;
-    }
-
-    return false;
 }
 
 static int read_bcd(gpio_num_t bit1, gpio_num_t bit2, gpio_num_t bit4, gpio_num_t bit8)
@@ -790,10 +752,6 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_BCS_RESPONSE_EVT:
         negotiated_hfp_codec = param->bcs_rep.mode;
         ESP_LOGI(TAG, "HFP音频编解码协商结果(mode=%d)", param->bcs_rep.mode);
-        if (param->bcs_rep.mode != 1)
-        {
-            ESP_LOGW(TAG, "⚠️ 当前协商到的不是CVSD，说明固件/车机仍可能在走宽带语音路径");
-        }
         break;
 
     case ESP_HF_WBS_RESPONSE_EVT:
@@ -831,10 +789,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 
     case ESP_HF_UNAT_RESPONSE_EVT:
         ESP_LOGW(TAG, "收到未知AT命令: %s", param->unat_rep.unat ? param->unat_rep.unat : "(null)");
-        if (!send_known_at_identity_response(param->unat_rep.remote_addr, param->unat_rep.unat))
-        {
-            esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
-        }
+        esp_hf_ag_unknown_at_send(param->unat_rep.remote_addr, NULL);
         break;
 
     default:
@@ -1130,34 +1085,6 @@ static void button_task(void *arg)
     }
 }
 
-static void call_state_sync_task(void *arg)
-{
-    while (1)
-    {
-        if (hfp_connected)
-        {
-            if (current_call_state == CALL_STATE_INCOMING)
-            {
-                sync_hfp_call_indicators(0, 1);
-            }
-            else if (current_call_state == CALL_STATE_DIALING)
-            {
-                sync_hfp_call_indicators(0, 2);
-            }
-            else if (current_call_state == CALL_STATE_ALERTING)
-            {
-                sync_hfp_call_indicators(0, 3);
-            }
-            else if (current_call_state == CALL_STATE_ACTIVE)
-            {
-                sync_hfp_call_indicators(1, 0);
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-}
-
 static void switch_monitor_task(void *arg)
 {
     int last_right = -1;
@@ -1280,8 +1207,6 @@ void app_main(void)
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     ESP_LOGI(TAG, "  设备名: %s", bt_name);
     ESP_LOGI(TAG, "  PIN码: 1234");
-    ESP_LOGI(TAG, "  HFP WBS: %s", hfp_wbs_enabled ? "ENABLED" : "DISABLED");
-    ESP_LOGI(TAG, "  HFP音频路径: %s", hfp_audio_path);
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "");
 
@@ -1330,7 +1255,6 @@ void app_main(void)
     // 创建任务
     xTaskCreate(led_task, "led", 2048, NULL, 5, NULL);
     xTaskCreate(button_task, "button", 4096, NULL, 5, NULL);
-    xTaskCreate(call_state_sync_task, "call_sync", 3072, NULL, 5, NULL);
     xTaskCreate(switch_monitor_task, "switch", 4096, NULL, 5, NULL);
 
     esp_err_t ret_bt = start_bt_phone();
