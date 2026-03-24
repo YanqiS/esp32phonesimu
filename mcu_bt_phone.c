@@ -138,8 +138,9 @@ static void ring_timer_callback(TimerHandle_t xTimer)
     if (current_call_state == CALL_STATE_INCOMING && hfp_connected)
     {
         ESP_LOGI(TAG, "🔔 发送RING...");
-        // 持续发送呼叫指示
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);
+        // 持续维持“来电建立中”状态，避免被车机误判为已接通
+        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 1);
     }
 }
 
@@ -265,6 +266,10 @@ void handle_call_reject(void)
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
 
+    // 显式同步空闲状态，提升部分车机界面收敛速度
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+
     memset(current_phone_number, 0, sizeof(current_phone_number));
     ESP_LOGI(TAG, "📵 来电已拒绝");
 }
@@ -296,6 +301,10 @@ void handle_call_hangup(void)
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
+
+    // 显式同步空闲状态，避免车机界面残留在通话页
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
 
     // 断开SCO音频
     esp_hf_ag_audio_disconnect(connected_device);
@@ -341,6 +350,14 @@ void handle_call_dial(const char *number)
 
     // 发送callsetup=2 (外拨中)
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 2);
+
+    // 很多车机会在alerting(3)时才弹出完整通话界面
+    vTaskDelay(pdMS_TO_TICKS(300));
+    if (current_call_state == CALL_STATE_DIALING)
+    {
+        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 3);
+        ESP_LOGI(TAG, "📞 对方振铃中...");
+    }
 
     // 模拟对方接听（2秒后自动接通）
     vTaskDelay(pdMS_TO_TICKS(2000));
