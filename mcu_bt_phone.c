@@ -686,6 +686,15 @@ static esp_err_t bt_init(void)
     // 设置蓝牙设备名称（使用新API）
     esp_bt_gap_set_device_name(bt_name);
 
+    // 车机常按Class of Device过滤可见设备，显式声明为“手机+电话服务”
+    esp_bt_cod_t cod = {
+        .major = 0x02, // Phone
+        .minor = 0x04, // Cellular
+        .service = ESP_BT_COD_SRVC_TELEPHONY | ESP_BT_COD_SRVC_RENDERING,
+    };
+    esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_MAJOR_MINOR);
+    ESP_LOGI(TAG, "COD已设置: major=0x%02X minor=0x%02X service=0x%06X", cod.major, cod.minor, cod.service);
+
     // 设置可发现和可连接
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
 
