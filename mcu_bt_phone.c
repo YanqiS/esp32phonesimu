@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -51,6 +52,41 @@ typedef enum {
 static call_state_t current_call_state = CALL_STATE_IDLE;
 static char current_phone_number[32] = "";
 static TimerHandle_t ring_timer = NULL;
+static TimerHandle_t out_alert_timer = NULL;
+static TimerHandle_t out_answer_timer = NULL;
+static SemaphoreHandle_t state_mutex = NULL;
+
+static inline void state_lock(void)
+{
+    if (state_mutex != NULL)
+    {
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+    }
+}
+
+static inline void state_unlock(void)
+{
+    if (state_mutex != NULL)
+    {
+        xSemaphoreGive(state_mutex);
+    }
+}
+
+static inline call_state_t get_call_state(void)
+{
+    call_state_t s;
+    state_lock();
+    s = current_call_state;
+    state_unlock();
+    return s;
+}
+
+static inline void set_call_state(call_state_t s)
+{
+    state_lock();
+    current_call_state = s;
+    state_unlock();
+}
 
 /* ===================== LED控制 ===================== */
 
@@ -134,6 +170,8 @@ static void led_task(void *arg)
 
 static void report_incoming_ring_indicators(void)
 {
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);  // service=1
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);   // signal=5
     // 来电状态：无活动通话，但处于来电建立中
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_INCOMING);
@@ -151,10 +189,51 @@ static void report_incoming_ring_indicators(void)
 // 定时发送RING
 static void ring_timer_callback(TimerHandle_t xTimer)
 {
-    if (current_call_state == CALL_STATE_INCOMING && hfp_connected)
+    if (get_call_state() == CALL_STATE_INCOMING && hfp_connected)
     {
         ESP_LOGI(TAG, "🔔 发送RING...");
         report_incoming_ring_indicators();
+    }
+}
+
+static void outgoing_answer_timer_callback(TimerHandle_t xTimer)
+{
+    if (get_call_state() != CALL_STATE_DIALING || !hfp_connected)
+    {
+        return;
+    }
+
+    ESP_LOGI(TAG, "✅ 对方已接听");
+    set_call_state(CALL_STATE_ACTIVE);
+    led_mode = 4; // 红灯常亮
+
+    esp_hf_ag_out_call(
+        connected_device,
+        1,                                // num_active=1
+        0,
+        ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,
+        ESP_HF_CALL_SETUP_STATUS_IDLE,
+        current_phone_number,
+        ESP_HF_CALL_ADDR_TYPE_UNKNOWN
+    );
+
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+    esp_hf_ag_audio_connect(connected_device);
+}
+
+static void outgoing_alert_timer_callback(TimerHandle_t xTimer)
+{
+    if (get_call_state() != CALL_STATE_DIALING || !hfp_connected)
+    {
+        return;
+    }
+
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING);
+    ESP_LOGI(TAG, "📞 对方振铃中...");
+    if (out_answer_timer != NULL)
+    {
+        xTimerStart(out_answer_timer, 0);
     }
 }
 
@@ -167,7 +246,7 @@ void simulate_incoming_call(const char *phone_number)
         return;
     }
 
-    if (current_call_state != CALL_STATE_IDLE)
+    if (get_call_state() != CALL_STATE_IDLE)
     {
         ESP_LOGW(TAG, "❌ 当前有通话，无法模拟新来电");
         return;
@@ -180,7 +259,7 @@ void simulate_incoming_call(const char *phone_number)
 
     // 保存电话号码
     strncpy(current_phone_number, phone_number, sizeof(current_phone_number) - 1);
-    current_call_state = CALL_STATE_INCOMING;
+    set_call_state(CALL_STATE_INCOMING);
 
     // 更新LED
     led_mode = 3; // 绿灯快闪
@@ -188,9 +267,6 @@ void simulate_incoming_call(const char *phone_number)
     // 发送状态指示 - 来电中
     // 使用ciev_report发送单独的指示器
     report_incoming_ring_indicators();
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);        // service=1 (有网络)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);         // signal=5 (满格信号)
-
     // 启动RING定时器（每3秒发送一次）
     if (ring_timer == NULL)
     {
@@ -204,7 +280,7 @@ void simulate_incoming_call(const char *phone_number)
 // 接听来电
 void handle_call_answer(void)
 {
-    if (current_call_state != CALL_STATE_INCOMING)
+    if (get_call_state() != CALL_STATE_INCOMING)
     {
         ESP_LOGW(TAG, "❌ 当前无来电，无法接听");
         return;
@@ -221,7 +297,7 @@ void handle_call_answer(void)
         xTimerStop(ring_timer, 0);
     }
 
-    current_call_state = CALL_STATE_ACTIVE;
+    set_call_state(CALL_STATE_ACTIVE);
     led_mode = 4; // 红灯常亮
 
     // 先同步CIEV状态，再发送接听应答，提升车机状态机兼容性
@@ -248,7 +324,7 @@ void handle_call_answer(void)
 // 拒接来电
 void handle_call_reject(void)
 {
-    if (current_call_state != CALL_STATE_INCOMING)
+    if (get_call_state() != CALL_STATE_INCOMING)
     {
         ESP_LOGW(TAG, "❌ 当前无来电，无法拒接");
         return;
@@ -265,7 +341,7 @@ void handle_call_reject(void)
         xTimerStop(ring_timer, 0);
     }
 
-    current_call_state = CALL_STATE_IDLE;
+    set_call_state(CALL_STATE_IDLE);
     led_mode = 2; // 绿灯常亮
 
     // 发送拒接应答
@@ -290,7 +366,7 @@ void handle_call_reject(void)
 // 挂断电话
 void handle_call_hangup(void)
 {
-    if (current_call_state != CALL_STATE_ACTIVE)
+    if (get_call_state() != CALL_STATE_ACTIVE)
     {
         ESP_LOGW(TAG, "❌ 当前无通话，无法挂断");
         return;
@@ -301,7 +377,7 @@ void handle_call_hangup(void)
     ESP_LOGI(TAG, "📴 电话号码: %s", current_phone_number);
     ESP_LOGI(TAG, "📴 ===============================");
 
-    current_call_state = CALL_STATE_IDLE;
+    set_call_state(CALL_STATE_IDLE);
     led_mode = 2; // 绿灯常亮
 
     // 发送挂断应答
@@ -335,7 +411,7 @@ void handle_call_dial(const char *number)
         return;
     }
 
-    if (current_call_state != CALL_STATE_IDLE)
+    if (get_call_state() != CALL_STATE_IDLE)
     {
         ESP_LOGW(TAG, "❌ 当前有通话，无法拨号");
         return;
@@ -347,7 +423,7 @@ void handle_call_dial(const char *number)
     ESP_LOGI(TAG, "📞 ===============================");
 
     strncpy(current_phone_number, number, sizeof(current_phone_number) - 1);
-    current_call_state = CALL_STATE_DIALING;
+    set_call_state(CALL_STATE_DIALING);
     led_mode = 3; // 绿灯快闪
 
     // 发送外拨应答
@@ -356,7 +432,7 @@ void handle_call_dial(const char *number)
         0,                                    // num_active=0
         0,                                    // num_held=0
         ESP_HF_CALL_STATUS_NO_CALLS,
-        ESP_HF_CALL_SETUP_STATUS_IDLE,        // 使用IDLE，然后用ciev_report更新
+        ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING,
         (char *)number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
@@ -364,38 +440,17 @@ void handle_call_dial(const char *number)
     // 发送callsetup=2 (外拨中)
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING);
 
-    // 很多车机会在alerting(3)时才弹出完整通话界面
-    vTaskDelay(pdMS_TO_TICKS(300));
-    if (current_call_state == CALL_STATE_DIALING)
+    if (out_alert_timer == NULL)
     {
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING);
-        ESP_LOGI(TAG, "📞 对方振铃中...");
+        out_alert_timer = xTimerCreate("out_alert", pdMS_TO_TICKS(300), pdFALSE, NULL, outgoing_alert_timer_callback);
     }
-
-    // 模拟对方接听（2秒后自动接通）
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    if (current_call_state == CALL_STATE_DIALING)
+    if (out_answer_timer == NULL)
     {
-        ESP_LOGI(TAG, "✅ 对方已接听");
-        current_call_state = CALL_STATE_ACTIVE;
-        led_mode = 4; // 红灯常亮
-
-        esp_hf_ag_out_call(
-            connected_device,
-            1,                                // num_active=1
-            0,
-            ESP_HF_CALL_STATUS_NO_CALLS,
-            ESP_HF_CALL_SETUP_STATUS_IDLE,
-            current_phone_number,
-            ESP_HF_CALL_ADDR_TYPE_UNKNOWN
-        );
-
-        // 更新呼叫状态
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);      // call=1 (有活动呼叫)
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0); // callsetup=0 (空闲)
-
-        esp_hf_ag_audio_connect(connected_device);
+        out_answer_timer = xTimerCreate("out_answer", pdMS_TO_TICKS(2000), pdFALSE, NULL, outgoing_answer_timer_callback);
+    }
+    if (out_alert_timer != NULL)
+    {
+        xTimerStart(out_alert_timer, 0);
     }
 }
 
@@ -412,7 +467,11 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
                  (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED) ? "已连接" : "已断开",
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
 
-        if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED)
+        if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED
+#ifdef ESP_HF_CONNECTION_STATE_SLC_CONNECTED
+            || param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED
+#endif
+        )
         {
             hfp_connected = true;
             memcpy(connected_device, bda, 6);
@@ -428,13 +487,21 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         {
             hfp_connected = false;
             memset(connected_device, 0, 6);
-            current_call_state = CALL_STATE_IDLE;
+            set_call_state(CALL_STATE_IDLE);
             led_mode = 1; // 蓝灯慢闪
 
             // 停止RING
             if (ring_timer != NULL)
             {
                 xTimerStop(ring_timer, 0);
+            }
+            if (out_alert_timer != NULL)
+            {
+                xTimerStop(out_alert_timer, 0);
+            }
+            if (out_answer_timer != NULL)
+            {
+                xTimerStop(out_answer_timer, 0);
             }
         }
         break;
@@ -454,11 +521,11 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_CHUP_RESPONSE_EVT:
         // 车机按下了"挂断/拒接"按钮
         ESP_LOGI(TAG, "🎯 车机发送挂断命令");
-        if (current_call_state == CALL_STATE_INCOMING)
+        if (get_call_state() == CALL_STATE_INCOMING)
         {
             handle_call_reject();
         }
-        else if (current_call_state == CALL_STATE_ACTIVE)
+        else if (get_call_state() == CALL_STATE_ACTIVE)
         {
             handle_call_hangup();
         }
@@ -601,7 +668,7 @@ static void bt_deinit(void)
     esp_bt_controller_deinit();
 
     hfp_connected = false;
-    current_call_state = CALL_STATE_IDLE;
+    set_call_state(CALL_STATE_IDLE);
 
     ESP_LOGI(TAG, "蓝牙已关闭");
 }
@@ -702,6 +769,13 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    state_mutex = xSemaphoreCreateMutex();
+    if (state_mutex == NULL)
+    {
+        ESP_LOGE(TAG, "状态互斥锁创建失败");
+        return;
+    }
 
     // 读取MAC地址生成唯一标识
     uint8_t mac[6];
