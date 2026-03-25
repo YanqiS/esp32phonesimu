@@ -132,15 +132,29 @@ static void led_task(void *arg)
 
 /* ===================== 呼叫管理 ===================== */
 
+static void report_incoming_ring_indicators(void)
+{
+    // 来电状态：无活动通话，但处于来电建立中
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_INCOMING);
+
+    // 很多车机会依赖RING/+CLIP触发来电界面
+    esp_hf_ag_unknown_at_send(connected_device, "RING");
+    if (current_phone_number[0] != '\0')
+    {
+        char clip[64];
+        snprintf(clip, sizeof(clip), "+CLIP: \"%s\",129", current_phone_number);
+        esp_hf_ag_unknown_at_send(connected_device, clip);
+    }
+}
+
 // 定时发送RING
 static void ring_timer_callback(TimerHandle_t xTimer)
 {
     if (current_call_state == CALL_STATE_INCOMING && hfp_connected)
     {
         ESP_LOGI(TAG, "🔔 发送RING...");
-        // 持续维持“来电建立中”状态，避免被车机误判为已接通
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 1);
+        report_incoming_ring_indicators();
     }
 }
 
@@ -173,8 +187,7 @@ void simulate_incoming_call(const char *phone_number)
 
     // 发送状态指示 - 来电中
     // 使用ciev_report发送单独的指示器
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);           // call=0 (无活动呼叫)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 1);      // callsetup=1 (来电中)
+    report_incoming_ring_indicators();
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SERVICE, 1);        // service=1 (有网络)
     esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_SIGNAL, 5);         // signal=5 (满格信号)
 
@@ -211,20 +224,20 @@ void handle_call_answer(void)
     current_call_state = CALL_STATE_ACTIVE;
     led_mode = 4; // 红灯常亮
 
+    // 先同步CIEV状态，再发送接听应答，提升车机状态机兼容性
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);         // call=1 (有活动呼叫)
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);    // callsetup=0 (无呼叫建立中)
+
     // 发送接听应答
     esp_hf_ag_answer_call(
         connected_device,
         1,                                    // num_active=1 (1个活动呼叫)
         0,                                    // num_held=0
-        ESP_HF_CALL_STATUS_NO_CALLS,          // call_state
+        ESP_HF_CALL_STATUS_CALL_IN_PROGRESS,  // call_state
         ESP_HF_CALL_SETUP_STATUS_IDLE,
         current_phone_number,
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
-
-    // 发送呼叫状态更新
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);         // call=1 (有活动呼叫)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);    // callsetup=0 (无呼叫建立中)
 
     // 建立SCO音频连接
     esp_hf_ag_audio_connect(connected_device);
@@ -349,13 +362,13 @@ void handle_call_dial(const char *number)
     );
 
     // 发送callsetup=2 (外拨中)
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 2);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING);
 
     // 很多车机会在alerting(3)时才弹出完整通话界面
     vTaskDelay(pdMS_TO_TICKS(300));
     if (current_call_state == CALL_STATE_DIALING)
     {
-        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 3);
+        esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING);
         ESP_LOGI(TAG, "📞 对方振铃中...");
     }
 
@@ -404,6 +417,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             hfp_connected = true;
             memcpy(connected_device, bda, 6);
             led_mode = 2; // 绿灯常亮
+            esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
 
             ESP_LOGI(TAG, "");
             ESP_LOGI(TAG, "🎉 HFP连接成功！");
