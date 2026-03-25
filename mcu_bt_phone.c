@@ -35,7 +35,7 @@
 static char my_mac_id[8];
 static char bt_name[32];
 static bool bt_on = false;
-static int led_mode = 0;
+static volatile int led_mode = 0;
 
 // HFP连接状态
 static bool hfp_connected = false;
@@ -85,6 +85,22 @@ static inline void set_call_state(call_state_t s)
 {
     state_lock();
     current_call_state = s;
+    state_unlock();
+}
+
+static inline bool get_hfp_connected(void)
+{
+    bool c;
+    state_lock();
+    c = hfp_connected;
+    state_unlock();
+    return c;
+}
+
+static inline void set_hfp_connected(bool c)
+{
+    state_lock();
+    hfp_connected = c;
     state_unlock();
 }
 
@@ -189,7 +205,7 @@ static void report_incoming_ring_indicators(void)
 // 定时发送RING
 static void ring_timer_callback(TimerHandle_t xTimer)
 {
-    if (get_call_state() == CALL_STATE_INCOMING && hfp_connected)
+    if (get_call_state() == CALL_STATE_INCOMING && get_hfp_connected())
     {
         ESP_LOGI(TAG, "🔔 发送RING...");
         report_incoming_ring_indicators();
@@ -198,7 +214,7 @@ static void ring_timer_callback(TimerHandle_t xTimer)
 
 static void outgoing_answer_timer_callback(TimerHandle_t xTimer)
 {
-    if (get_call_state() != CALL_STATE_DIALING || !hfp_connected)
+    if (get_call_state() != CALL_STATE_DIALING || !get_hfp_connected())
     {
         return;
     }
@@ -206,6 +222,9 @@ static void outgoing_answer_timer_callback(TimerHandle_t xTimer)
     ESP_LOGI(TAG, "✅ 对方已接听");
     set_call_state(CALL_STATE_ACTIVE);
     led_mode = 4; // 红灯常亮
+
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
 
     esp_hf_ag_out_call(
         connected_device,
@@ -217,14 +236,12 @@ static void outgoing_answer_timer_callback(TimerHandle_t xTimer)
         ESP_HF_CALL_ADDR_TYPE_UNKNOWN
     );
 
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 1);
-    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
     esp_hf_ag_audio_connect(connected_device);
 }
 
 static void outgoing_alert_timer_callback(TimerHandle_t xTimer)
 {
-    if (get_call_state() != CALL_STATE_DIALING || !hfp_connected)
+    if (get_call_state() != CALL_STATE_DIALING || !get_hfp_connected())
     {
         return;
     }
@@ -240,7 +257,7 @@ static void outgoing_alert_timer_callback(TimerHandle_t xTimer)
 // 模拟来电
 void simulate_incoming_call(const char *phone_number)
 {
-    if (!hfp_connected)
+    if (!get_hfp_connected())
     {
         ESP_LOGW(TAG, "❌ HFP未连接，无法模拟来电");
         return;
@@ -402,10 +419,47 @@ void handle_call_hangup(void)
     ESP_LOGI(TAG, "📵 通话已结束");
 }
 
+// 取消外拨（振铃中挂断）
+void handle_call_cancel_dialing(void)
+{
+    if (get_call_state() != CALL_STATE_DIALING)
+    {
+        return;
+    }
+
+    ESP_LOGI(TAG, "📵 取消外拨: %s", current_phone_number);
+
+    if (out_alert_timer != NULL)
+    {
+        xTimerStop(out_alert_timer, 0);
+    }
+    if (out_answer_timer != NULL)
+    {
+        xTimerStop(out_answer_timer, 0);
+    }
+
+    set_call_state(CALL_STATE_IDLE);
+    led_mode = 2;
+
+    esp_hf_ag_end_call(
+        connected_device,
+        0,
+        0,
+        ESP_HF_CALL_STATUS_NO_CALLS,
+        ESP_HF_CALL_SETUP_STATUS_IDLE,
+        current_phone_number,
+        ESP_HF_CALL_ADDR_TYPE_UNKNOWN
+    );
+
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALL, 0);
+    esp_hf_ag_ciev_report(connected_device, ESP_HF_IND_TYPE_CALLSETUP, 0);
+    memset(current_phone_number, 0, sizeof(current_phone_number));
+}
+
 // 外拨电话
 void handle_call_dial(const char *number)
 {
-    if (!hfp_connected)
+    if (!get_hfp_connected())
     {
         ESP_LOGW(TAG, "❌ HFP未连接，无法拨号");
         return;
@@ -473,7 +527,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
 #endif
         )
         {
-            hfp_connected = true;
+            set_hfp_connected(true);
             memcpy(connected_device, bda, 6);
             led_mode = 2; // 绿灯常亮
             esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
@@ -485,7 +539,7 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
         }
         else
         {
-            hfp_connected = false;
+            set_hfp_connected(false);
             memset(connected_device, 0, 6);
             set_call_state(CALL_STATE_IDLE);
             led_mode = 1; // 蓝灯慢闪
@@ -521,13 +575,18 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_CHUP_RESPONSE_EVT:
         // 车机按下了"挂断/拒接"按钮
         ESP_LOGI(TAG, "🎯 车机发送挂断命令");
-        if (get_call_state() == CALL_STATE_INCOMING)
+        call_state_t now_state = get_call_state();
+        if (now_state == CALL_STATE_INCOMING)
         {
             handle_call_reject();
         }
-        else if (get_call_state() == CALL_STATE_ACTIVE)
+        else if (now_state == CALL_STATE_ACTIVE)
         {
             handle_call_hangup();
+        }
+        else if (now_state == CALL_STATE_DIALING)
+        {
+            handle_call_cancel_dialing();
         }
         break;
 
@@ -667,7 +726,7 @@ static void bt_deinit(void)
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
 
-    hfp_connected = false;
+    set_hfp_connected(false);
     set_call_state(CALL_STATE_IDLE);
 
     ESP_LOGI(TAG, "蓝牙已关闭");
