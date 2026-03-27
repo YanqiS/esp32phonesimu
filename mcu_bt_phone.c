@@ -517,25 +517,42 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
     case ESP_HF_CONNECTION_STATE_EVT:
     {
         uint8_t *bda = param->conn_stat.remote_bda;
-        ESP_LOGI(TAG, "HFP连接状态: %s [%02X:%02X:%02X:%02X:%02X:%02X]",
-                 (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED) ? "已连接" : "已断开",
+        ESP_LOGI(TAG, "HFP连接状态: state=%d [%02X:%02X:%02X:%02X:%02X:%02X]",
+                 param->conn_stat.state,
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
 
-        if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED
-#ifdef ESP_HF_CONNECTION_STATE_SLC_CONNECTED
-            || param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED
-#endif
-        )
+        if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTED)
         {
-            set_hfp_connected(true);
             memcpy(connected_device, bda, 6);
-            led_mode = 2; // 绿灯常亮
+            led_mode = 2;
+#ifdef ESP_HF_CONNECTION_STATE_SLC_CONNECTED
+            set_hfp_connected(false);
+            ESP_LOGI(TAG, "HFP RFCOMM已连接，等待SLC建立...");
+#else
+            set_hfp_connected(true);
+            esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
+            ESP_LOGI(TAG, "🎉 HFP连接成功（当前IDF无SLC细分状态）");
+#endif
+        }
+#ifdef ESP_HF_CONNECTION_STATE_SLC_CONNECTED
+        else if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_SLC_CONNECTED)
+        {
+            memcpy(connected_device, bda, 6);
+            led_mode = 2;
+            set_hfp_connected(true);
             esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
 
             ESP_LOGI(TAG, "");
-            ESP_LOGI(TAG, "🎉 HFP连接成功！");
+            ESP_LOGI(TAG, "🎉 HFP服务级连接(SLC)成功！");
             ESP_LOGI(TAG, "💡 按CALL_KEY (GPIO23) 模拟来电");
             ESP_LOGI(TAG, "");
+        }
+#endif
+        else if (param->conn_stat.state == ESP_HF_CONNECTION_STATE_CONNECTING ||
+                 param->conn_stat.state == ESP_HF_CONNECTION_STATE_DISCONNECTING)
+        {
+            set_hfp_connected(false);
+            ESP_LOGI(TAG, "HFP连接过渡状态: %d", param->conn_stat.state);
         }
         else
         {
