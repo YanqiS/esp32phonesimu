@@ -530,7 +530,6 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             ESP_LOGI(TAG, "HFP RFCOMM已连接，等待SLC建立...");
 #else
             set_hfp_connected(true);
-            esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
             ESP_LOGI(TAG, "🎉 HFP连接成功（当前IDF无SLC细分状态）");
 #endif
         }
@@ -540,7 +539,6 @@ static void hfp_ag_callback(esp_hf_cb_event_t event, esp_hf_cb_param_t *param)
             memcpy(connected_device, bda, 6);
             led_mode = 2;
             set_hfp_connected(true);
-            esp_hf_ag_bsir(connected_device, ESP_HF_IN_BAND_RINGTONE_NOT_PROVIDED);
 
             ESP_LOGI(TAG, "");
             ESP_LOGI(TAG, "🎉 HFP服务级连接(SLC)成功！");
